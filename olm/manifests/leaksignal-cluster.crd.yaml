@@ -18,6 +18,7 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
+          description: Deploy LeakSignal Proxy in all istio-enabled namespaces, can be overriden by local LeaksignalIstios.
           properties:
             spec:
               type: object

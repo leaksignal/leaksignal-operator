@@ -1,6 +1,6 @@
 schema: olm.bundle
 package: leaksignal-operator
-name: leaksignal-operator.0.3.1
+name: leaksignal-operator.v0.3.1
 
 image: docker.io/leaksignal/leaksignal-operator-olm:0.3.1
 relatedImages:

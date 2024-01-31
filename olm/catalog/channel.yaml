@@ -2,4 +2,4 @@ schema: olm.channel
 package: leaksignal-operator
 name: stable
 entries:
-- name: leaksignal-operator.0.3.1
+- name: leaksignal-operator.v0.3.1
