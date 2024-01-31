@@ -1,3 +1,4 @@
+---
 annotations:
   # Core bundle annotations.
   operators.operatorframework.io.bundle.mediatype.v1: registry+v1
@@ -5,3 +6,4 @@ annotations:
   operators.operatorframework.io.bundle.metadata.v1: metadata/
   operators.operatorframework.io.bundle.package.v1: leaksignal-operator
   operators.operatorframework.io.bundle.channels.v1: stable
+  com.redhat.openshift.versions: v4.6-v4.14

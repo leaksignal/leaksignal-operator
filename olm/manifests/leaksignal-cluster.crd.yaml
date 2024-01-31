@@ -1,3 +1,4 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -46,10 +47,12 @@ spec:
                   description: Port of upstream ingestion. Defaults to 80/443 depending on `tls`. Recommended 8121 for LeakAgent.
                 caBundle:
                   type: string
-                  description: Location of CA bundle in istio-proxy. Default is `/etc/ssl/certs/ca-certificates.crt` which is suitable for Istio. OpenShift Service Mesh requires `/etc/ssl/certs/ca-bundle.crt`.
+                  description: "Location of CA bundle in istio-proxy. Default is `/etc/ssl/certs/ca-certificates.crt` which is suitable for Istio. \
+                  OpenShift Service Mesh requires `/etc/ssl/certs/ca-bundle.crt`."
                 refreshPodsOnUpdate:
                   type: boolean
-                  description: For WASM mode, redeploys all pods with Istio sidecars affected by a LeakSignal Proxy upgrade. This provides more consistent behavior. Default is `true`.
+                  description: "For WASM mode, redeploys all pods with Istio sidecars affected by a LeakSignal Proxy upgrade. This provides more consistent behavior. \
+                  Default is `true`."
                 grpcMode:
                   type: string
                   enum: ["default", "envoy"]
@@ -59,7 +62,8 @@ spec:
                   description: If `true` (default), then L4 streams are also scanned by LeakSignal Proxy.
                 native:
                   type: boolean
-                  description: If `true` (not default), istio-proxy containers are updated to a corresponding image with support for dynamic plugins, and the native LeakSignal Proxy module is installed.
+                  description: "If `true` (not default), istio-proxy containers are updated to a corresponding image with support for dynamic plugins, \
+                  and the native LeakSignal Proxy module is installed."
                 failOpen:
                   type: boolean
                   description: If `true` (default), if LeakSignal Proxy has a failure, then all traffic is routed around it.
