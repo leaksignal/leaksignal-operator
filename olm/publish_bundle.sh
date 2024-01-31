@@ -10,6 +10,9 @@ fi
 
 export TAG=$1
 
+cp ../crds/leaksignal-crd.yaml ./manifests/leaksignal.crd.yaml
+cp ../crds/leaksignal-cluster-crd.yaml ./manifests/leaksignal-cluster.crd.yaml
+
 docker build -t leaksignal/leaksignal-operator-olm:$TAG .
 docker push leaksignal/leaksignal-operator-olm:$TAG
 

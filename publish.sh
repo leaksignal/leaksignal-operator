@@ -23,3 +23,5 @@ helm package -d ./helm_upload/ ./chart
 helm push ./helm_upload/*.tgz oci://registry-1.docker.io/leaksignal
 
 rm -rf helm_upload
+
+./olm/publish_bundle.sh $TAG
