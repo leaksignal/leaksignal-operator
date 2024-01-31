@@ -9,7 +9,7 @@ metadata:
     createdAt: '2024-01-31T00:00:00Z'
     support: LeakSignal Inc. https://leaksignal.com
     description: Install LeakSignal in seconds with the LeakSignal Operator.
-    repository: https://github.com/leaksignal/leaksignal
+    repository: https://github.com/leaksignal/leaksignal-operator
     certified: 'false'
     alm-examples: |
       [
