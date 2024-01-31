@@ -8,7 +8,7 @@ metadata:
     containerImage: docker.io/leaksignal/leaksignal-operator:0.3.1
     createdAt: '2024-01-31T00:00:00Z'
     support: LeakSignal Inc. https://leaksignal.com
-    description: Install LeakSignal in seconds with the LeakSignal Operator.
+    description: Secure your data in seconds with the LeakSignal Operator.
     repository: https://github.com/leaksignal/leaksignal-operator
     certified: 'false'
     alm-examples: |
@@ -39,7 +39,7 @@ metadata:
         }
       ]
 spec:
-  description: Install LeakSignal in seconds with the LeakSignal Operator.
+  description: Secure your data in seconds with the LeakSignal Operator.
   displayName: LeakSignal Operator
   keywords:
   - leaksignal
