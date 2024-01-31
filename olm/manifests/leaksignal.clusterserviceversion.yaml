@@ -130,7 +130,7 @@ spec:
             spec:
               containers:
               - name: leaksignal-operator
-                image: leaksignal/leaksignal-operator@sha256:3031208c57b9fd8a367e3378b05896feae03e6c358a21259918796e9b0127ec1
+                image: docker.io/leaksignal/leaksignal-operator@sha256:3031208c57b9fd8a367e3378b05896feae03e6c358a21259918796e9b0127ec1
                 resources:
                   requests: 
                     memory: 256Mi
