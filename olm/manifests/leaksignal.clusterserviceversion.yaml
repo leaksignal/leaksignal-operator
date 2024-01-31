@@ -65,9 +65,11 @@ spec:
     - name: leaksignal-istios.leaksignal.com
       version: v1
       kind: LeaksignalIstio
+      description: Deploy LeakSignal Proxy in a specific namespace.
     - name: cluster-leaksignal-istios.leaksignal.com
       version: v1
       kind: ClusterLeaksignalIstio
+      description: Deploy LeakSignal Proxy in all istio-enabled namespaces, can be overriden by local LeaksignalIstios.
   install:
     strategy: deployment
     spec:
@@ -126,17 +128,17 @@ spec:
               labels:
                 app: leaksignal-operator
             spec:
-              resources:
-                requests: 
-                  memory: 256Mi
-                  cpu: 500m
-                limits:
-                  memory: 1Gi
-                  cpu: 1.0
               containers:
               - name: leaksignal-operator
                 image: leaksignal/leaksignal-operator:1.3.1
                 imagePullPolicy: "Always"
+                resources:
+                  requests: 
+                    memory: 256Mi
+                    cpu: 500m
+                  limits:
+                    memory: 1Gi
+                    cpu: 1.0
               serviceAccountName: leaksignal-operator
   installModes:
   - supported: false
