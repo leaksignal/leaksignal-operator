@@ -78,10 +78,12 @@ spec:
       version: v1
       kind: LeaksignalIstio
       description: Deploy LeakSignal Proxy in a specific namespace.
+      displayName: LeaksignalIstio
     - name: cluster-leaksignal-istios.leaksignal.com
       version: v1
       kind: ClusterLeaksignalIstio
       description: Deploy LeakSignal Proxy in all istio-enabled namespaces, can be overriden by local LeaksignalIstios.
+      displayName: ClusterLeaksignalIstio
   install:
     strategy: deployment
     spec:
