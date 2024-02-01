@@ -16,6 +16,10 @@ docker image rm leaksignal/leaksignal-operator:$TAG
 
 echo "Uploaded image leaksignal/leaksignal-operator:$TAG"
 
+docker build -t leaksignal/leaksignal-operator:$TAG-ubi -f ./Dockerfile.ubi .
+docker push leaksignal/leaksignal-operator:$TAG-ubi
+docker image rm leaksignal/leaksignal-operator:$TAG-ubi
+
 cp -f ./crds/* ./chart/crds/
 
 helm package -d ./helm_upload/ ./chart
