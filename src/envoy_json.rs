@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::{CRDValues, GrpcMode, ISTIO_NAME};
+use crate::{CRDValues, GrpcMode};
 
 fn create_plugin_config(is_streaming: bool, values: &CRDValues, port: &str) -> Value {
     let mut configuration = match values.grpc_mode {
@@ -112,8 +112,26 @@ upstream_url: {scheme}{}{port}",
     })
 }
 
+pub struct OwnerInfo {
+    pub kind: String,
+    pub name: String,
+    pub uid: String,
+}
+
+impl OwnerInfo {
+    pub fn owner_reference(&self) -> Value {
+        json!({
+          "apiVersion": "v1",
+          "blockOwnerDeletion": true,
+          "kind": self.kind,
+          "name": self.name,
+          "uid": self.uid,
+        })
+    }
+}
+
 /// creates json that will be applied to EnvoyFilter
-pub fn create_json(namespace: &str, values: &CRDValues) -> Value {
+pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Value {
     let port = if values.upstream_port != 443 {
         format!(":{}", values.upstream_port)
     } else {
@@ -213,8 +231,11 @@ pub fn create_json(namespace: &str, values: &CRDValues) -> Value {
       "apiVersion": "networking.istio.io/v1alpha3",
       "kind": "EnvoyFilter",
       "metadata": {
-        "name": ISTIO_NAME,
+        "name": &values.istio_name,
         "namespace": namespace,
+        "ownerReferences": [
+          owner.owner_reference(),
+        ],
       },
       "spec": {
         "configPatches": patches,

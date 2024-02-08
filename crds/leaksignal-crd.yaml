@@ -63,6 +63,9 @@ spec:
                 failOpen:
                   type: boolean
                   description: If `true` (default), if LeakSignal Proxy has a failure, then all traffic is routed around it.
+                istioName:
+                  type: string
+                  description: If set, use an alternate name for created EnvoyFilter objects, to allow multiple LeaksignalIstio objects in one namespace.
                 workloadSelector:
                   type: object
                   description: Pod selector for workloads.

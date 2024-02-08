@@ -2,6 +2,7 @@
 
 mod envoy_json;
 
+use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
 use k8s_openapi::api::{
     apps::v1::{Deployment, ReplicaSet, StatefulSet},
@@ -28,7 +29,9 @@ use tokio::time::Duration;
 
 use crate::envoy_json::create_json;
 
-const ISTIO_NAME: &str = "leaksignal-istio";
+fn default_istio_name() -> String {
+    "leaksignal-istio".to_string()
+}
 
 fn default_upstream_port() -> usize {
     443
@@ -105,6 +108,8 @@ pub struct CRDValues {
     fail_open: bool,
     #[serde(default)]
     workload_selector: WorkloadSelector,
+    #[serde(default = "default_istio_name")]
+    istio_name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -206,7 +211,7 @@ impl CRDValues {
             .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
             .collect();
         let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-        let pods = pod_api.list(&ListParams::default()).await?.items;
+        let pods = pod_api.list(&self.list_params()).await?.items;
 
         for pod in pods {
             let has_sidecar = pod
@@ -298,8 +303,10 @@ impl CRDValues {
                 deployment_api
                     .patch(
                         deployment.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com"),
-                        &Patch::Merge(json!({
+                        &PatchParams::apply("leaksignal.com").force(),
+                        &Patch::Apply(json!({
+                            "apiVersion": "apps/v1",
+                            "kind": "Deployment",
                             "spec": {
                                 "template": {
                                     "metadata": {
@@ -372,8 +379,10 @@ impl CRDValues {
                 statefulset_api
                     .patch(
                         statefulset.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com"),
-                        &Patch::Merge(json!({
+                        &PatchParams::apply("leaksignal.com").force(),
+                        &Patch::Apply(json!({
+                            "apiVersion": "apps/v1",
+                            "kind": "StatefulSet",
                             "spec": {
                                 "template": {
                                     "metadata": {
@@ -426,7 +435,7 @@ impl CRDValues {
             .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
             .collect();
         let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-        let pods = pod_api.list(&ListParams::default()).await?.items;
+        let pods = pod_api.list(&self.list_params()).await?.items;
 
         for pod in pods {
             let has_sidecar = pod
@@ -505,17 +514,10 @@ impl CRDValues {
                 deployment_api
                     .patch(
                         deployment.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com"),
-                        &Patch::Merge(json!({
-                            "spec": {
-                                "template": {
-                                    "metadata": {
-                                        "annotations": {
-                                            PROXY_IMAGE_KEY: Value::Null,
-                                        }
-                                    }
-                                }
-                            }
+                        &PatchParams::apply("leaksignal.com").force(),
+                        &Patch::Apply(json!({
+                            "apiVersion": "apps/v1",
+                            "kind": "Deployment",
                         })),
                     )
                     .await?;
@@ -566,17 +568,10 @@ impl CRDValues {
                 statefulset_api
                     .patch(
                         statefulset.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com"),
-                        &Patch::Merge(json!({
-                            "spec": {
-                                "template": {
-                                    "metadata": {
-                                        "annotations": {
-                                            PROXY_IMAGE_KEY: Value::Null,
-                                        }
-                                    }
-                                }
-                            }
+                        &PatchParams::apply("leaksignal.com").force(),
+                        &Patch::Apply(json!({
+                            "apiVersion": "apps/v1",
+                            "kind": "StatefulSet",
                         })),
                     )
                     .await?;
@@ -636,6 +631,11 @@ impl LeaksignalIstioSpec {
                 client,
                 &name,
                 &namespace,
+                &OwnerInfo {
+                    kind: "LeaksignalIstio".to_string(),
+                    name: name.clone(),
+                    uid: leaksignal_istio.uid().unwrap_or_default(),
+                },
                 &leaksignal_istio.spec.inner,
                 namespaced_istios,
             )
@@ -663,6 +663,11 @@ impl LeaksignalIstioSpec {
                     client,
                     &name,
                     &namespace,
+                    &OwnerInfo {
+                        kind: "ClusterLeaksignalIstio".to_string(),
+                        name: name.clone(),
+                        uid: cluster_istio.uid().unwrap_or_default(),
+                    },
                     &cluster_istio.spec.inner,
                     cluster_istios,
                 )
@@ -731,6 +736,11 @@ impl ClusterLeaksignalIstioSpec {
                     client.clone(),
                     &name,
                     &ns,
+                    &OwnerInfo {
+                        kind: "ClusterLeaksignalIstio".to_string(),
+                        name: name.clone(),
+                        uid: cluster_leaksignal_istio.uid().unwrap_or_default(),
+                    },
                     &cluster_leaksignal_istio.spec.inner,
                     Api::all(client.clone()),
                 )
@@ -752,6 +762,7 @@ async fn apply<T>(
     client: Client,
     name: &str,
     namespace: &str,
+    owner: &OwnerInfo,
     values: &CRDValues,
     resource_api: Api<T>,
 ) -> Result<(), Error>
@@ -765,6 +776,22 @@ where
         "EnvoyFilter",
     ));
     let filters: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &resource);
+
+    if let Some(current_filter) = filters.get_opt(&values.istio_name).await? {
+        let current_owner = current_filter
+            .owner_references()
+            .iter()
+            .find(|current_owner| {
+                current_owner.api_version == "v1"
+                    && (current_owner.kind == "LeaksignalIstio"
+                        || current_owner.kind == "ClusterLeaksignalIstio")
+            });
+        if let Some(current_owner) = current_owner {
+            if current_owner.uid != owner.uid {
+                return Err(Error::UserInputError("conflict detected in istioName fields -- is there more than one LeaksignalIstio with the same istioName value (or default) -- skipping reconcile".to_string()));
+            }
+        }
+    }
 
     // Fetch the current state of the LeaksignalIstio or ClusterLeaksignalIstio resource
     let leaksignal_istio_resource: T = resource_api.get(name).await?;
@@ -784,10 +811,13 @@ where
             name, namespace
         );
         // Delete the EnvoyFilter
-        if let Err(e) = filters.delete(ISTIO_NAME, &DeleteParams::default()).await {
+        if let Err(e) = filters
+            .delete(&values.istio_name, &DeleteParams::default())
+            .await
+        {
             error!(
                 "failed to delete EnvoyFilter {} in {}: {}",
-                ISTIO_NAME, namespace, e
+                values.istio_name, namespace, e
             )
         }
 
@@ -817,14 +847,14 @@ where
 
     // if the object has not been deleted, apply the filter
     if !is_deleted {
-        info!("patching {}", ISTIO_NAME);
+        info!("patching {}", values.istio_name);
 
         values.apply_native(client.clone(), namespace).await?;
 
-        let filter = create_json(namespace, values);
+        let filter = create_json(namespace, owner, values);
         let mut new: DynamicObject = serde_json::from_value(filter)
             .map_err(|e| Error::UserInputError(format!("failed to parse new envoyfilter: {e}")))?;
-        match filters.get_opt(ISTIO_NAME).await? {
+        match filters.get_opt(&values.istio_name).await? {
             Some(current) => {
                 if new.data == current.data {
                     info!("skipping patch due to no spec change");
@@ -833,7 +863,7 @@ where
 
                 new.metadata.resource_version = current.metadata.resource_version;
                 filters
-                    .replace(ISTIO_NAME, &PostParams::default(), &new)
+                    .replace(&values.istio_name, &PostParams::default(), &new)
                     .await?;
             }
             None => {
