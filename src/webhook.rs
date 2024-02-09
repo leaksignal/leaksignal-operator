@@ -209,12 +209,14 @@ async fn mutate(res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, 
         Cow::Owned(format!("{}:{tag}", crd.native_repo))
     };
 
-    Ok(
-        res.with_patch(json_patch::Patch(vec![PatchOperation::Replace(
-            ReplaceOperation {
-                path: format!("/spec/containers/{istio_container_idx}/image"),
-                value: serde_json::Value::String(new_image.into_owned()),
-            },
-        )]))?,
-    )
+    Ok(res.with_patch(json_patch::Patch(vec![
+        PatchOperation::Replace(ReplaceOperation {
+            path: format!("/spec/containers/{istio_container_idx}/image"),
+            value: serde_json::Value::String(new_image.into_owned()),
+        }),
+        PatchOperation::Replace(ReplaceOperation {
+            path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
+            value: serde_json::Value::String(crd.native_proxy_memory_limit),
+        }),
+    ]))?)
 }

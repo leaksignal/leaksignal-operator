@@ -57,6 +57,14 @@ fn default_native_repo() -> String {
     "leaksignal/istio-proxy".to_string()
 }
 
+fn default_proxy_pull_location() -> String {
+    "https://leakproxy.s3.us-west-2.amazonaws.com/".to_string()
+}
+
+fn default_native_proxy_memory_limit() -> String {
+    "3Gi".to_string()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Kubernetes reported error: {source}")]
@@ -94,6 +102,7 @@ pub struct CRDValues {
     pub upstream_location: String,
     #[serde(default = "default_proxy_prefix")]
     #[serde(alias = "proxy_prefix")]
+    #[deprecated]
     pub proxy_prefix: String,
     #[serde(default = "default_true")]
     pub tls: bool,
@@ -120,6 +129,10 @@ pub struct CRDValues {
     pub istio_name: String,
     #[serde(default = "default_native_repo")]
     pub native_repo: String,
+    #[serde(default = "default_proxy_pull_location")]
+    pub proxy_pull_location: String,
+    #[serde(default = "default_native_proxy_memory_limit")]
+    pub native_proxy_memory_limit: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -286,6 +299,7 @@ impl ClusterLeaksignalIstioSpec {
         // Iterate over the namespaces
         for ns in ns_list {
             // Check for a LeaksignalIstio in the namespace
+
             let leaksignal_istio_api: Api<LeaksignalIstio> = Api::namespaced(client.clone(), &ns);
             if leaksignal_istio_api
                 .list(&ListParams::default())
@@ -416,11 +430,12 @@ where
     if !is_deleted {
         info!("patching {}", values.istio_name);
 
-        values.apply_native(client.clone(), namespace).await?;
-
-        let filter = create_json(namespace, owner, values);
+        let filter = create_json(namespace, owner, values)?;
         let mut new: DynamicObject = serde_json::from_value(filter)
             .map_err(|e| Error::UserInputError(format!("failed to parse new envoyfilter: {e}")))?;
+
+        values.apply_native(client.clone(), namespace).await?;
+
         match filters.get_opt(&values.istio_name).await? {
             Some(current) => {
                 if new.data == current.data {

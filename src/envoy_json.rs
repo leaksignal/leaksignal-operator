@@ -1,8 +1,13 @@
 use serde_json::{json, Value};
+use url::Url;
 
-use crate::{CRDValues, GrpcMode};
+use crate::{CRDValues, Error, GrpcMode};
 
-fn create_plugin_config(is_streaming: bool, values: &CRDValues, port: &str) -> Value {
+fn create_plugin_config(
+    is_streaming: bool,
+    values: &CRDValues,
+    proxy_url: &Url,
+) -> Result<Value, Error> {
     let mut configuration = match values.grpc_mode {
         GrpcMode::Envoy => format!(
             r"upstream_cluster: leaksignal_infra
@@ -36,23 +41,19 @@ upstream_url: {scheme}{}{port}",
         &values.proxy_hash[..values.proxy_hash.len().min(7)]
     );
 
+    let mut proxy_url = proxy_url.clone();
     let vm_config = if values.native {
+        proxy_url.path_segments_mut().unwrap().push("leaksignal.so");
+
         json!({
           "runtime": "envoy.wasm.runtime.dyn",
           "vm_id": vm_id,
           "code": {
             "remote": {
               "http_uri": {
-                "uri": format!(
-                  "{}://{}{}/{}/{}/leaksignal.so",
-                  if values.tls {"https"} else {"http"},
-                  values.upstream_location,
-                  port,
-                  values.proxy_prefix,
-                  values.proxy_version
-                ),
+                "uri": proxy_url,
                 "timeout": "120s",
-                "cluster": "leaksignal_infra"
+                "cluster": "leaksignal_pull"
               },
               "sha256": values.proxy_hash,
               "retry_policy": {
@@ -62,6 +63,10 @@ upstream_url: {scheme}{}{port}",
           }
         })
     } else {
+        proxy_url
+            .path_segments_mut()
+            .unwrap()
+            .push("leaksignal.wasm");
         json!({
           "runtime": "envoy.wasm.runtime.v8",
           "vm_id": vm_id,
@@ -80,16 +85,9 @@ upstream_url: {scheme}{}{port}",
           "code": {
             "remote": {
               "http_uri": {
-                "uri": format!(
-                  "{}://{}{}/{}/{}/leaksignal.wasm",
-                  if values.tls {"https"} else {"http"},
-                  values.upstream_location,
-                  port,
-                  values.proxy_prefix,
-                  values.proxy_version
-                ),
+                "uri": proxy_url,
                 "timeout": "120s",
-                "cluster": "leaksignal_infra"
+                "cluster": "leaksignal_pull"
               },
               "sha256": values.proxy_hash,
               "retry_policy": {
@@ -100,7 +98,7 @@ upstream_url: {scheme}{}{port}",
         })
     };
 
-    json!({
+    Ok(json!({
       "name": "leaksignal",
       // "root_id": "leaksignal",
       "configuration": {
@@ -109,7 +107,7 @@ upstream_url: {scheme}{}{port}",
       },
       "fail_open": values.fail_open,
       "vm_config": vm_config,
-    })
+    }))
 }
 
 pub struct OwnerInfo {
@@ -130,13 +128,113 @@ impl OwnerInfo {
     }
 }
 
+fn create_transport_socket(location: &str, ca_bundle: &str) -> Value {
+    json!({
+      "name": "envoy.transport_sockets.tls",
+      "typed_config": {
+        "@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
+        "sni": location,
+        "common_tls_context": {
+        "validation_context": {
+          "match_typed_subject_alt_names": [
+          {
+            "san_type": "DNS",
+            "matcher": {
+            "exact": location
+            }
+          }
+          ],
+          "trusted_ca": {
+            "filename": ca_bundle
+          }
+        }
+        }
+      }
+    })
+}
+
 /// creates json that will be applied to EnvoyFilter
-pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Value {
-    let port = if values.upstream_port != 443 {
-        format!(":{}", values.upstream_port)
-    } else {
-        String::new()
-    };
+pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Result<Value, Error> {
+    let mut proxy_url: Url = values
+        .proxy_pull_location
+        .parse()
+        .map_err(|e| Error::UserInputError(format!("failed to parse proxyPullLocation: {e:?}")))?;
+    if proxy_url.cannot_be_a_base()
+        || (proxy_url.scheme() != "https" && proxy_url.scheme() != "http")
+    {
+        return Err(Error::UserInputError(
+            "proxyPullLocation must be a http(s) URL".to_string(),
+        ));
+    }
+    proxy_url
+        .path_segments_mut()
+        .unwrap()
+        .push(&values.proxy_version);
+
+    let mut infra_cluster = json!({
+      "name": "leaksignal_infra",
+      "type": "STRICT_DNS",
+      "http2_protocol_options": {},
+      "dns_lookup_family": "V4_PREFERRED",
+      "lb_policy": "ROUND_ROBIN",
+      "load_assignment": {
+        "cluster_name": "leaksignal_infra0",
+        "endpoints": [
+          {
+            "lb_endpoints": [
+              {
+                "endpoint": {
+                  "address": {
+                    "socket_address": {
+                      "address": values.upstream_location,
+                      "port_value": values.upstream_port
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+    });
+    if values.tls {
+        infra_cluster.as_object_mut().unwrap().insert(
+            "transport_socket".to_string(),
+            create_transport_socket(&values.upstream_location, &values.ca_bundle),
+        );
+    }
+
+    let mut pull_cluster = json!({
+      "name": "leaksignal_pull",
+      "type": "STRICT_DNS",
+      "dns_lookup_family": "V4_PREFERRED",
+      "lb_policy": "ROUND_ROBIN",
+      "load_assignment": {
+        "cluster_name": "leaksignal_pull0",
+        "endpoints": [
+          {
+            "lb_endpoints": [
+              {
+                "endpoint": {
+                  "address": {
+                    "socket_address": {
+                      "address": proxy_url.host_str(),
+                      "port_value": proxy_url.port_or_known_default(),
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+    });
+    if proxy_url.scheme() == "https" {
+        pull_cluster.as_object_mut().unwrap().insert(
+            "transport_socket".to_string(),
+            create_transport_socket(proxy_url.host_str().unwrap_or_default(), &values.ca_bundle),
+        );
+    }
 
     let mut patches = vec![
         json!({
@@ -159,7 +257,7 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Va
               "name": "leaksignal-proxy",
               "typed_config": {
                 "@type": "type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm",
-                "config": create_plugin_config(false, values, &port),
+                "config": create_plugin_config(false, values, &proxy_url)?,
               }
             }
           }
@@ -171,32 +269,17 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Va
           },
           "patch": {
             "operation": "ADD",
-            "value": {
-              "name": "leaksignal_infra",
-              "type": "STRICT_DNS",
-              "http2_protocol_options": {},
-              "dns_lookup_family": "V4_PREFERRED",
-              "lb_policy": "ROUND_ROBIN",
-              "load_assignment": {
-                "cluster_name": "leaksignal_infra0",
-                "endpoints": [
-                  {
-                    "lb_endpoints": [
-                      {
-                        "endpoint": {
-                          "address": {
-                            "socket_address": {
-                              "address": values.upstream_location,
-                              "port_value": values.upstream_port
-                            }
-                          }
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-            }
+            "value": infra_cluster,
+          }
+        }),
+        json!({
+          "applyTo": "CLUSTER",
+          "match": {
+            "context": "ANY"
+          },
+          "patch": {
+            "operation": "ADD",
+            "value": pull_cluster,
           }
         }),
     ];
@@ -220,14 +303,14 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Va
               "name": "leaksignal-proxy-stream",
               "typed_config": {
                 "@type": "type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm",
-                "config": create_plugin_config(true, values, &port),
+                "config": create_plugin_config(true, values, &proxy_url)?,
               }
             }
           }
         }));
     }
 
-    let mut v = json!({
+    Ok(json!({
       "apiVersion": "networking.istio.io/v1alpha3",
       "kind": "EnvoyFilter",
       "metadata": {
@@ -241,46 +324,5 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Va
         "configPatches": patches,
         "workloadSelector": values.workload_selector,
       }
-    });
-
-    // todo gross
-    if values.tls {
-        v.get_mut("spec")
-            .unwrap()
-            .get_mut("configPatches")
-            .unwrap()
-            .get_mut(1)
-            .unwrap()
-            .get_mut("patch")
-            .unwrap().get_mut("value").unwrap()
-            .as_object_mut()
-            .unwrap()
-            .insert(
-				"transport_socket".into(),
-				json!({
-					"name": "envoy.transport_sockets.tls",
-					"typed_config": {
-						"@type": "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext",
-						"sni": values.upstream_location,
-						"common_tls_context": {
-						"validation_context": {
-							"match_typed_subject_alt_names": [
-							{
-								"san_type": "DNS",
-								"matcher": {
-								"exact": values.upstream_location
-								}
-							}
-							],
-							"trusted_ca": {
-							"filename": values.ca_bundle
-							}
-						}
-						}
-					}
-				})
-			);
-    }
-
-    v
+    }))
 }
