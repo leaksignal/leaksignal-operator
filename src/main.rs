@@ -2,24 +2,26 @@
 
 mod envoy_json;
 mod native;
+mod webhook;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
-use k8s_openapi::api::core::v1::{Namespace, Pod};
+use k8s_openapi::api::core::v1::{Namespace, Secret};
 use kube::{
     api::{DeleteParams, ListParams, Patch, PatchParams, PostParams},
     client::Client,
-    core::{DynamicObject, GroupVersionKind},
+    core::{admission::SerializePatchError, DynamicObject, GroupVersionKind, ObjectMeta},
     discovery::ApiResource,
     runtime::{controller::Action, watcher::Config, Controller},
     Api, CustomResource, Resource, ResourceExt,
 };
 use log::{error, info, warn};
+use rcgen::{Certificate, CertificateParams};
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::{Debug, Write},
     sync::Arc,
 };
@@ -64,6 +66,10 @@ pub enum Error {
     },
     #[error("Invalid Leak CRD: {0}")]
     UserInputError(String),
+    #[error("Failed to generate certificate: {0}")]
+    CertError(#[from] rcgen::Error),
+    #[error("Failed to serialize patch: {0}")]
+    PatchError(#[from] SerializePatchError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -144,42 +150,6 @@ impl CRDValues {
             out = out.labels(&label_selector);
         }
         out
-    }
-}
-
-impl CRDValues {
-    async fn refresh_pod(&self, client: Client, namespace: &str) -> Result<(), Error> {
-        if !self.refresh_pods_on_update || self.native {
-            return Ok(());
-        }
-
-        let pods: Api<Pod> = Api::namespaced(client, namespace);
-        for p in pods.list(&self.list_params()).await? {
-            let has_sidecar = p
-                .metadata
-                .annotations
-                .as_ref()
-                .map(|v| v.contains_key("sidecar.istio.io/status"))
-                .unwrap_or_default();
-
-            let owner_references_set = p
-                .metadata
-                .owner_references
-                .as_ref()
-                .map(|v| {
-                    v.iter()
-                        .any(|v| v.kind == "ReplicaSet" || v.kind == "StatefulSet")
-                })
-                .unwrap_or_default();
-
-            if has_sidecar && owner_references_set {
-                let name = p.name_any();
-                info!("refreshing pod {} in ns {}", name, namespace);
-                pods.delete(&name, &DeleteParams::default()).await?;
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -429,7 +399,7 @@ where
             .patch(name, &PatchParams::default(), &patch)
             .await?;
         values.deapply_native(client.clone(), namespace).await?;
-        values.refresh_pod(client.clone(), namespace).await?;
+        values.refresh_pods(client.clone(), namespace).await?;
     } else {
         let finalizer = json!({
             "metadata": {
@@ -468,10 +438,87 @@ where
             }
         }
 
-        values.refresh_pod(client, namespace).await?;
+        values.refresh_pods(client, namespace).await?;
     }
 
     Ok(())
+}
+
+const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
+
+#[derive(Serialize, Deserialize)]
+pub struct SecretData {
+    pub key: Vec<u8>,
+    pub cert: Vec<u8>,
+}
+
+impl TryFrom<Secret> for SecretData {
+    type Error = Error;
+
+    fn try_from(mut value: Secret) -> Result<Self, Self::Error> {
+        Ok(SecretData {
+            key: value
+                .data
+                .as_mut()
+                .and_then(|x| x.remove("tls.key"))
+                .ok_or_else(|| Error::UserInputError("missing tls.key from secret".to_string()))?
+                .0,
+            cert: value
+                .data
+                .as_mut()
+                .and_then(|x| x.remove("tls.crt"))
+                .ok_or_else(|| Error::UserInputError("missing tls.crt from secret".to_string()))?
+                .0,
+        })
+    }
+}
+
+async fn load_cert(client: Client) -> Result<SecretData, Error> {
+    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
+    if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
+        return secret.try_into();
+    };
+
+    let cert = Certificate::from_params(CertificateParams::new(vec![format!(
+        "leaksignal-operator.{}.svc",
+        client.default_namespace()
+    )]))?;
+
+    let mut data = BTreeMap::new();
+    data.insert(
+        "tls.crt".to_string(),
+        k8s_openapi::ByteString(cert.serialize_pem()?.into_bytes()),
+    );
+    data.insert(
+        "tls.key".to_string(),
+        k8s_openapi::ByteString(cert.serialize_private_key_pem().into_bytes()),
+    );
+    let out = secret_api
+        .create(
+            &PostParams::default(),
+            &Secret {
+                data: Some(data),
+                immutable: Some(true),
+                metadata: ObjectMeta {
+                    name: Some(WEBHOOK_SECRET_NAME.to_string()),
+                    namespace: Some(client.default_namespace().to_string()),
+                    ..Default::default()
+                },
+                type_: Some("kubernetes.io/tls".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    match out {
+        Ok(out) => out.try_into(),
+        Err(e) => {
+            if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
+                return secret.try_into();
+            };
+            Err(e.into())
+        }
+    }
 }
 
 #[tokio::main]
@@ -480,6 +527,30 @@ async fn main() -> Result<(), kube::Error> {
         .parse_env(env_logger::Env::default().default_filter_or("info"))
         .init();
     let client = Client::try_default().await?;
+
+    let certificate = match load_cert(client.clone()).await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("failed to create/load webhook TLS cert: {e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = webhook::prepare_webhook(client.clone(), &certificate).await {
+        error!("failed to apply webhook config: {e:?}");
+        std::process::exit(1);
+    }
+
+    tokio::spawn(async move {
+        match webhook::run_webhook(&certificate).await {
+            Ok(()) => {
+                error!("webhook terminated successfully");
+            }
+            Err(e) => {
+                error!("webhook failed to run: {e:?}");
+            }
+        }
+    });
 
     // Configure your controllers
     let leaksignal_istio_controller = Controller::new(Api::all(client.clone()), Config::default());

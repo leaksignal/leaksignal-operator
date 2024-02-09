@@ -56,6 +56,20 @@ rules:
   - update
   - patch
   - delete
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  verbs:
+  - get
+  - watch
+  - list
+  - create
+  - update
+  - patch
+  - delete
+  resourceNames:
+  - z-leaksignal-operator
 {{ if .Values.rbacArgoRollout }}
 - apiGroups: ["argoproj.io"]
   resources:
@@ -66,6 +80,27 @@ rules:
   - patch
   - update
 {{ end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "leaksignal.name" . }}
+  labels:
+    app: {{ include "leaksignal.name" . }}
+    {{- include "leaksignal.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources:
+  - secrets
+  verbs:
+  - get
+  - watch
+  - list
+  - create
+  - update
+  - patch
+  - delete
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -82,4 +117,21 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "leaksignal.name" . }}
   namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "leaksignal.name" . }}
+  labels:
+    app: {{ include "leaksignal.name" . }}
+    {{- include "leaksignal.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "leaksignal.name" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "leaksignal.name" . }}
+  namespace: {{ .Release.Namespace }}
+
 {{ end }}

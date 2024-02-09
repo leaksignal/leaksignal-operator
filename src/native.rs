@@ -1,4 +1,5 @@
 use crate::{CRDValues, Error};
+use chrono::Utc;
 use k8s_openapi::api::{
     apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet},
     core::v1::Pod,
@@ -11,8 +12,8 @@ use kube::{
     Api, ResourceExt,
 };
 use log::{debug, info};
-use serde_json::json;
-use std::{borrow::Cow, collections::HashMap};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
 struct DeployInfo {
     pub proxy_image: Option<String>,
@@ -32,6 +33,20 @@ struct NativeState {
 }
 
 const PROXY_IMAGE_KEY: &str = "sidecar.istio.io/proxyImage";
+
+fn restart_patch() -> Value {
+    json!({
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": Utc::now().to_rfc3339(),
+                    }
+                }
+            }
+        }
+    })
+}
 
 impl CRDValues {
     async fn prepare_native(&self, client: Client, namespace: &str) -> Result<NativeState, Error> {
@@ -148,7 +163,7 @@ impl CRDValues {
                 else {
                     continue;
                 };
-                //
+
                 if replica_owner.kind == "Deployment" {
                     if let Some(deployment) = deployments.remove(&replica_owner.uid) {
                         let proxy_image = deployment
@@ -286,9 +301,9 @@ impl CRDValues {
 
         for (
             DeployInfo {
-                proxy_image,
                 image,
                 pod_name,
+                proxy_image: _,
             },
             deployment,
         ) in deployments
@@ -302,46 +317,34 @@ impl CRDValues {
                 debug!("pod {pod_name}: skipping because image already correct",);
                 continue;
             }
-            let new_image = if self.native_repo.contains(':') {
-                Cow::Borrowed(&*self.native_repo)
-            } else {
-                Cow::Owned(format!("{}:{tag}", self.native_repo))
-            };
-            if proxy_image == Some(format!("{target_repo}:{target_tag}")) {
-                debug!("pod {pod_name}: skipping because correct image already requested",);
+            if deployment
+                .spec
+                .as_ref()
+                .map(|x| x.paused == Some(true))
+                .unwrap_or_default()
+            {
+                debug!("pod {pod_name}: skipping redeploy due to paused deployment");
                 continue;
             }
             info!(
-                "patching deployment {}/{} for native",
+                "restarting deployment {}/{} for native rollout",
                 deployment.metadata.namespace.as_deref().unwrap_or_default(),
                 deployment.metadata.name.as_deref().unwrap_or_default()
             );
             deployment_api
                 .patch(
                     deployment.metadata.name.as_deref().unwrap_or_default(),
-                    &PatchParams::apply("leaksignal.com").force(),
-                    &Patch::Apply(json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "Deployment",
-                        "spec": {
-                            "template": {
-                                "metadata": {
-                                    "annotations": {
-                                        PROXY_IMAGE_KEY: new_image,
-                                    }
-                                }
-                            }
-                        }
-                    })),
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
                 )
                 .await?;
         }
 
         for (
             DeployInfo {
-                proxy_image,
                 image,
                 pod_name,
+                proxy_image: _,
             },
             statefulset,
         ) in statefulsets
@@ -355,17 +358,8 @@ impl CRDValues {
                 debug!("pod {pod_name}: skipping because image already correct",);
                 continue;
             }
-            let new_image = if self.native_repo.contains(':') {
-                Cow::Borrowed(&*self.native_repo)
-            } else {
-                Cow::Owned(format!("{}:{tag}", self.native_repo))
-            };
-            if proxy_image == Some(format!("{target_repo}:{target_tag}")) {
-                debug!("pod {pod_name}: skipping because correct image already requested",);
-                continue;
-            }
             info!(
-                "patching statefulset {}/{} for native",
+                "restarting statefulset {}/{} for native rollout",
                 statefulset
                     .metadata
                     .namespace
@@ -376,29 +370,17 @@ impl CRDValues {
             statefulset_api
                 .patch(
                     statefulset.metadata.name.as_deref().unwrap_or_default(),
-                    &PatchParams::apply("leaksignal.com").force(),
-                    &Patch::Apply(json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "StatefulSet",
-                        "spec": {
-                            "template": {
-                                "metadata": {
-                                    "annotations": {
-                                        PROXY_IMAGE_KEY: new_image,
-                                    }
-                                }
-                            }
-                        }
-                    })),
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
                 )
                 .await?;
         }
 
         for (
             DeployInfo {
-                proxy_image,
                 image,
                 pod_name,
+                proxy_image: _,
             },
             rollout,
         ) in rollouts
@@ -412,35 +394,18 @@ impl CRDValues {
                 debug!("pod {pod_name}: skipping because image already correct",);
                 continue;
             }
-            let new_image = if self.native_repo.contains(':') {
-                Cow::Borrowed(&*self.native_repo)
-            } else {
-                Cow::Owned(format!("{}:{tag}", self.native_repo))
-            };
-            if proxy_image == Some(format!("{target_repo}:{target_tag}")) {
-                debug!("pod {pod_name}: skipping because correct image already requested",);
-                continue;
-            }
             info!(
-                "patching rollout {}/{} for native",
+                "restarting rollout {}/{} for native rollout",
                 rollout.metadata.namespace.as_deref().unwrap_or_default(),
                 rollout.metadata.name.as_deref().unwrap_or_default()
             );
             rollout_api
                 .patch(
                     rollout.metadata.name.as_deref().unwrap_or_default(),
-                    &PatchParams::apply("leaksignal.com").force(),
-                    &Patch::Apply(json!({
-                        "apiVersion": "argoproj.io/v1alpha1",
-                        "kind": "Rollout",
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
                         "spec": {
-                            "template": {
-                                "metadata": {
-                                    "annotations": {
-                                        PROXY_IMAGE_KEY: new_image,
-                                    }
-                                }
-                            }
+                            "restartAt": Utc::now().to_rfc3339(),
                         }
                     })),
                 )
@@ -449,9 +414,9 @@ impl CRDValues {
 
         for (
             DeployInfo {
-                proxy_image,
                 image,
                 pod_name,
+                proxy_image: _,
             },
             daemonset,
         ) in daemonsets
@@ -465,37 +430,120 @@ impl CRDValues {
                 debug!("pod {pod_name}: skipping because image already correct",);
                 continue;
             }
-            let new_image = if self.native_repo.contains(':') {
-                Cow::Borrowed(&*self.native_repo)
-            } else {
-                Cow::Owned(format!("{}:{tag}", self.native_repo))
-            };
-            if proxy_image == Some(format!("{target_repo}:{target_tag}")) {
-                debug!("pod {pod_name}: skipping because correct image already requested",);
-                continue;
-            }
             info!(
-                "patching daemonset {}/{} for native",
+                "restarting daemonset {}/{} for native rollout",
                 daemonset.metadata.namespace.as_deref().unwrap_or_default(),
                 daemonset.metadata.name.as_deref().unwrap_or_default()
             );
             daemonset_api
                 .patch(
                     daemonset.metadata.name.as_deref().unwrap_or_default(),
-                    &PatchParams::apply("leaksignal.com").force(),
-                    &Patch::Apply(json!({
-                        "apiVersion": "apps/v1",
-                        "kind": "DaemonSet",
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn refresh_pods(&self, client: Client, namespace: &str) -> Result<(), Error> {
+        if self.native {
+            return Ok(());
+        }
+
+        let NativeState {
+            deployment_api,
+            statefulset_api,
+            rollout_api,
+            statefulsets,
+            deployments,
+            rollouts,
+            daemonset_api,
+            daemonsets,
+        } = self.prepare_native(client.clone(), namespace).await?;
+
+        for (
+            DeployInfo {
+                image: _,
+                pod_name,
+                proxy_image: _,
+            },
+            deployment,
+        ) in deployments
+        {
+            if deployment
+                .spec
+                .as_ref()
+                .map(|x| x.paused == Some(true))
+                .unwrap_or_default()
+            {
+                debug!("pod {pod_name}: skipping redeploy due to paused deployment");
+                continue;
+            }
+            info!(
+                "restarting deployment {}/{} for refresh",
+                deployment.metadata.namespace.as_deref().unwrap_or_default(),
+                deployment.metadata.name.as_deref().unwrap_or_default()
+            );
+            deployment_api
+                .patch(
+                    deployment.metadata.name.as_deref().unwrap_or_default(),
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
+                )
+                .await?;
+        }
+
+        for (_, statefulset) in statefulsets {
+            info!(
+                "restarting statefulset {}/{} for refresh",
+                statefulset
+                    .metadata
+                    .namespace
+                    .as_deref()
+                    .unwrap_or_default(),
+                statefulset.metadata.name.as_deref().unwrap_or_default()
+            );
+            statefulset_api
+                .patch(
+                    statefulset.metadata.name.as_deref().unwrap_or_default(),
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
+                )
+                .await?;
+        }
+
+        for (_, rollout) in rollouts {
+            info!(
+                "restarting rollout {}/{} for refresh",
+                rollout.metadata.namespace.as_deref().unwrap_or_default(),
+                rollout.metadata.name.as_deref().unwrap_or_default()
+            );
+            rollout_api
+                .patch(
+                    rollout.metadata.name.as_deref().unwrap_or_default(),
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
                         "spec": {
-                            "template": {
-                                "metadata": {
-                                    "annotations": {
-                                        PROXY_IMAGE_KEY: new_image,
-                                    }
-                                }
-                            }
+                            "restartAt": Utc::now().to_rfc3339(),
                         }
                     })),
+                )
+                .await?;
+        }
+
+        for (_, daemonset) in daemonsets {
+            info!(
+                "restarting daemonset {}/{} for refresh",
+                daemonset.metadata.namespace.as_deref().unwrap_or_default(),
+                daemonset.metadata.name.as_deref().unwrap_or_default()
+            );
+            daemonset_api
+                .patch(
+                    daemonset.metadata.name.as_deref().unwrap_or_default(),
+                    &PatchParams::default(),
+                    &Patch::Merge(restart_patch()),
                 )
                 .await?;
         }
@@ -521,9 +569,9 @@ impl CRDValues {
 
         for (
             DeployInfo {
-                proxy_image,
                 image: _,
                 pod_name,
+                proxy_image,
             },
             deployment,
         ) in deployments
