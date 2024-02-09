@@ -1,6 +1,7 @@
 nameOverride: ""
 
 rbacEnabled: true
+rbacArgoRollout: true
 image:
   repository: leaksignal/leaksignal-operator
 resources:

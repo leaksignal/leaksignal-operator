@@ -63,6 +63,9 @@ spec:
                 failOpen:
                   type: boolean
                   description: If `true` (default), if LeakSignal Proxy has a failure, then all traffic is routed around it.
+                nativeRepo:
+                  type: string
+                  description: Default is `leaksignal/istio-proxy`. If no tag is specified, it is inferred from the existing proxy image on each given pod.
                 workloadSelector:
                   type: object
                   description: Pod selector for workloads.

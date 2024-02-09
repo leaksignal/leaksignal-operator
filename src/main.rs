@@ -1,13 +1,11 @@
 #![warn(clippy::dbg_macro, clippy::todo)]
 
 mod envoy_json;
+mod native;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
-use k8s_openapi::api::{
-    apps::v1::{Deployment, ReplicaSet, StatefulSet},
-    core::v1::{Namespace, Pod},
-};
+use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{
     api::{DeleteParams, ListParams, Patch, PatchParams, PostParams},
     client::Client,
@@ -16,7 +14,7 @@ use kube::{
     runtime::{controller::Action, watcher::Config, Controller},
     Api, CustomResource, Resource, ResourceExt,
 };
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -53,8 +51,12 @@ fn default_upstream_location() -> String {
     "ingestion.app.leaksignal.com".into()
 }
 
+fn default_native_repo() -> String {
+    "leaksignal/istio-proxy".to_string()
+}
+
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub enum Error {
     #[error("Kubernetes reported error: {source}")]
     KubeError {
         #[from]
@@ -76,40 +78,42 @@ pub enum GrpcMode {
 #[serde(rename_all = "camelCase")]
 pub struct CRDValues {
     #[serde(alias = "proxy_version")]
-    proxy_version: String,
+    pub proxy_version: String,
     #[serde(alias = "proxy_hash")]
-    proxy_hash: String,
+    pub proxy_hash: String,
     #[serde(alias = "api_key")]
-    api_key: String,
+    pub api_key: String,
     #[serde(default = "default_upstream_location")]
     #[serde(alias = "upstream_location")]
-    upstream_location: String,
+    pub upstream_location: String,
     #[serde(default = "default_proxy_prefix")]
     #[serde(alias = "proxy_prefix")]
-    proxy_prefix: String,
+    pub proxy_prefix: String,
     #[serde(default = "default_true")]
-    tls: bool,
+    pub tls: bool,
     #[serde(default = "default_upstream_port")]
     #[serde(alias = "upstream_port")]
-    upstream_port: usize,
+    pub upstream_port: usize,
     #[serde(default = "default_ca_bundle")]
     #[serde(alias = "ca_bundle")]
-    ca_bundle: String,
+    pub ca_bundle: String,
     #[serde(default = "default_true")]
     #[serde(alias = "refresh_pods_on_update")]
-    refresh_pods_on_update: bool,
+    pub refresh_pods_on_update: bool,
     #[serde(default)]
-    grpc_mode: GrpcMode,
+    pub grpc_mode: GrpcMode,
     #[serde(default = "default_true")]
-    enable_streaming: bool,
+    pub enable_streaming: bool,
     #[serde(default)]
-    native: bool,
+    pub native: bool,
     #[serde(default = "default_true")]
-    fail_open: bool,
+    pub fail_open: bool,
     #[serde(default)]
-    workload_selector: WorkloadSelector,
+    pub workload_selector: WorkloadSelector,
     #[serde(default = "default_istio_name")]
-    istio_name: String,
+    pub istio_name: String,
+    #[serde(default = "default_native_repo")]
+    pub native_repo: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -143,9 +147,6 @@ impl CRDValues {
     }
 }
 
-const PROXY_IMAGE_KEY: &str = "sidecar.istio.io/proxyImage";
-const PROXY_TARGET_REPO: &str = "leaksignal/istio-proxy";
-
 impl CRDValues {
     async fn refresh_pod(&self, client: Client, namespace: &str) -> Result<(), Error> {
         if !self.refresh_pods_on_update || self.native {
@@ -175,410 +176,6 @@ impl CRDValues {
                 let name = p.name_any();
                 info!("refreshing pod {} in ns {}", name, namespace);
                 pods.delete(&name, &DeleteParams::default()).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn apply_native(&self, client: Client, namespace: &str) -> Result<(), Error> {
-        if !self.native {
-            return Ok(());
-        }
-
-        let deployment_api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-        let mut deployments: HashMap<String, Deployment> = deployment_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let statefulset_api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-        let mut statefulsets: HashMap<String, StatefulSet> = statefulset_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let replicaset_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
-        let replicasets: HashMap<String, ReplicaSet> = replicaset_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-        let pods = pod_api.list(&self.list_params()).await?.items;
-
-        for pod in pods {
-            let has_sidecar = pod
-                .metadata
-                .annotations
-                .as_ref()
-                .map(|v| v.contains_key("sidecar.istio.io/status"))
-                .unwrap_or_default();
-
-            if !has_sidecar {
-                continue;
-            }
-
-            let Some(owner) = pod.metadata.owner_references.as_ref().and_then(|v| {
-                v.iter()
-                    .find(|v| v.kind == "ReplicaSet" || v.kind == "StatefulSet")
-            }) else {
-                debug!("pod {}: missing owner for pod", pod.name_any());
-                continue;
-            };
-
-            if owner.kind == "ReplicaSet" {
-                let Some(replicaset) = replicasets.get(&owner.uid) else {
-                    debug!(
-                        "pod {}: missing replicaset for uid: {}",
-                        pod.name_any(),
-                        owner.uid
-                    );
-                    continue;
-                };
-                let Some(replica_owner) = replicaset
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .and_then(|v| v.iter().find(|v| v.kind == "Deployment"))
-                else {
-                    continue;
-                };
-                let Some(deployment) = deployments
-                    .get(&replica_owner.uid)
-                    .filter(|x| x.metadata.name.is_some())
-                else {
-                    debug!(
-                        "pod {}: missing deployment for uid: {}",
-                        pod.name_any(),
-                        replica_owner.uid
-                    );
-                    continue;
-                };
-                let current_proxy_image_metadata = deployment
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.template.metadata.as_ref())
-                    .and_then(|x| x.annotations.as_ref())
-                    .and_then(|x| x.get(PROXY_IMAGE_KEY));
-                let Some(current_proxy_image) = pod
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.containers.iter().find(|x| x.name == "istio-proxy"))
-                    .and_then(|x| x.image.as_ref())
-                else {
-                    debug!("pod {}: no istio container found", pod.name_any());
-                    continue;
-                };
-                let Some((repo, tag)) = current_proxy_image.split_once(':') else {
-                    debug!("pod {}: no istio image tag found", pod.name_any());
-                    continue;
-                };
-                if repo == PROXY_TARGET_REPO {
-                    debug!(
-                        "pod {}: skipping because image already correct",
-                        pod.name_any()
-                    );
-                    continue;
-                }
-                let new_image = format!("{PROXY_TARGET_REPO}:{tag}");
-                if current_proxy_image_metadata == Some(&new_image) {
-                    debug!(
-                        "pod {}: skipping because correct image already requested",
-                        pod.name_any()
-                    );
-                    continue;
-                }
-                info!(
-                    "patching deployment {}/{} for native",
-                    deployment.metadata.namespace.as_deref().unwrap_or_default(),
-                    deployment.metadata.name.as_deref().unwrap_or_default()
-                );
-                deployment_api
-                    .patch(
-                        deployment.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com").force(),
-                        &Patch::Apply(json!({
-                            "apiVersion": "apps/v1",
-                            "kind": "Deployment",
-                            "spec": {
-                                "template": {
-                                    "metadata": {
-                                        "annotations": {
-                                            PROXY_IMAGE_KEY: new_image,
-                                        }
-                                    }
-                                }
-                            }
-                        })),
-                    )
-                    .await?;
-                let uid = deployment.metadata.uid.clone().unwrap();
-                deployments.remove(&uid);
-            } else if owner.kind == "StatefulSet" {
-                let Some(statefulset) = statefulsets
-                    .get(&owner.uid)
-                    .filter(|x| x.metadata.name.is_some())
-                else {
-                    debug!(
-                        "pod {}: missing statefulset for uid: {}",
-                        pod.name_any(),
-                        owner.uid
-                    );
-                    continue;
-                };
-                let current_proxy_image_metadata = statefulset
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.template.metadata.as_ref())
-                    .and_then(|x| x.annotations.as_ref())
-                    .and_then(|x| x.get(PROXY_IMAGE_KEY));
-                let Some(current_proxy_image) = pod
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.containers.iter().find(|x| x.name == "istio-proxy"))
-                    .and_then(|x| x.image.as_ref())
-                else {
-                    debug!("pod {}: no istio container found", pod.name_any());
-                    continue;
-                };
-                let Some((repo, tag)) = current_proxy_image.split_once(':') else {
-                    debug!("pod {}: no istio image tag found", pod.name_any());
-                    continue;
-                };
-                if repo == PROXY_TARGET_REPO {
-                    debug!(
-                        "pod {}: skipping because image already correct",
-                        pod.name_any()
-                    );
-                    continue;
-                }
-                let new_image = format!("{PROXY_TARGET_REPO}:{tag}");
-                if current_proxy_image_metadata == Some(&new_image) {
-                    debug!(
-                        "pod {}: skipping because correct image already requested",
-                        pod.name_any()
-                    );
-                    continue;
-                }
-                info!(
-                    "patching statefulset {}/{} for native",
-                    statefulset
-                        .metadata
-                        .namespace
-                        .as_deref()
-                        .unwrap_or_default(),
-                    statefulset.metadata.name.as_deref().unwrap_or_default()
-                );
-                statefulset_api
-                    .patch(
-                        statefulset.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com").force(),
-                        &Patch::Apply(json!({
-                            "apiVersion": "apps/v1",
-                            "kind": "StatefulSet",
-                            "spec": {
-                                "template": {
-                                    "metadata": {
-                                        "annotations": {
-                                            PROXY_IMAGE_KEY: new_image,
-                                        }
-                                    }
-                                }
-                            }
-                        })),
-                    )
-                    .await?;
-                let uid = statefulset.metadata.uid.clone().unwrap();
-                statefulsets.remove(&uid);
-            } else {
-                unreachable!();
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn deapply_native(&self, client: Client, namespace: &str) -> Result<(), Error> {
-        if !self.native {
-            return Ok(());
-        }
-
-        let deployment_api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-        let mut deployments: HashMap<String, Deployment> = deployment_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let statefulset_api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-        let mut statefulsets: HashMap<String, StatefulSet> = statefulset_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let replicaset_api: Api<ReplicaSet> = Api::namespaced(client.clone(), namespace);
-        let replicasets: HashMap<String, ReplicaSet> = replicaset_api
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .filter_map(|x| Some((x.metadata.uid.clone()?, x)))
-            .collect();
-        let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-        let pods = pod_api.list(&self.list_params()).await?.items;
-
-        for pod in pods {
-            let has_sidecar = pod
-                .metadata
-                .annotations
-                .as_ref()
-                .map(|v| v.contains_key("sidecar.istio.io/status"))
-                .unwrap_or_default();
-
-            if !has_sidecar {
-                continue;
-            }
-
-            let Some(owner) = pod.metadata.owner_references.as_ref().and_then(|v| {
-                v.iter()
-                    .find(|v| v.kind == "ReplicaSet" || v.kind == "StatefulSet")
-            }) else {
-                debug!("pod {}: missing owner for pod", pod.name_any());
-                continue;
-            };
-
-            if owner.kind == "ReplicaSet" {
-                let Some(replicaset) = replicasets.get(&owner.uid) else {
-                    debug!(
-                        "pod {}: missing replicaset for uid: {}",
-                        pod.name_any(),
-                        owner.uid
-                    );
-                    continue;
-                };
-                let Some(replica_owner) = replicaset
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .and_then(|v| v.iter().find(|v| v.kind == "Deployment"))
-                else {
-                    continue;
-                };
-                let Some(deployment) = deployments
-                    .get(&replica_owner.uid)
-                    .filter(|x| x.metadata.name.is_some())
-                else {
-                    debug!(
-                        "pod {}: missing deployment for uid: {}",
-                        pod.name_any(),
-                        replica_owner.uid
-                    );
-                    continue;
-                };
-                let current_proxy_image_metadata = deployment
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.template.metadata.as_ref())
-                    .and_then(|x| x.annotations.as_ref())
-                    .and_then(|x| x.get(PROXY_IMAGE_KEY));
-                let Some(current_proxy_image_metadata) = current_proxy_image_metadata else {
-                    debug!(
-                        "pod {}: no istio proxyImage annotation found, skipping removal",
-                        pod.name_any()
-                    );
-                    continue;
-                };
-                let Some((repo, _)) = current_proxy_image_metadata.split_once(':') else {
-                    debug!("pod {}: no istio image tag found", pod.name_any());
-                    continue;
-                };
-                if repo != PROXY_TARGET_REPO {
-                    debug!("pod {}: skipping because image incorrect", pod.name_any());
-                    continue;
-                }
-                info!(
-                    "unpatching deployment {}/{} for native",
-                    deployment.metadata.namespace.as_deref().unwrap_or_default(),
-                    deployment.metadata.name.as_deref().unwrap_or_default()
-                );
-                deployment_api
-                    .patch(
-                        deployment.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com").force(),
-                        &Patch::Apply(json!({
-                            "apiVersion": "apps/v1",
-                            "kind": "Deployment",
-                        })),
-                    )
-                    .await?;
-                let uid = deployment.metadata.uid.clone().unwrap();
-                deployments.remove(&uid);
-            } else if owner.kind == "StatefulSet" {
-                let Some(statefulset) = statefulsets
-                    .get(&owner.uid)
-                    .filter(|x| x.metadata.name.is_some())
-                else {
-                    debug!(
-                        "pod {}: missing statefulset for uid: {}",
-                        pod.name_any(),
-                        owner.uid
-                    );
-                    continue;
-                };
-                let current_proxy_image_metadata = statefulset
-                    .spec
-                    .as_ref()
-                    .and_then(|x| x.template.metadata.as_ref())
-                    .and_then(|x| x.annotations.as_ref())
-                    .and_then(|x| x.get(PROXY_IMAGE_KEY));
-                let Some(current_proxy_image_metadata) = current_proxy_image_metadata else {
-                    debug!(
-                        "pod {}: no istio proxyImage annotation found, skipping removal",
-                        pod.name_any()
-                    );
-                    continue;
-                };
-                let Some((repo, _)) = current_proxy_image_metadata.split_once(':') else {
-                    debug!("pod {}: no istio image tag found", pod.name_any());
-                    continue;
-                };
-                if repo != PROXY_TARGET_REPO {
-                    debug!("pod {}: skipping because image incorrect", pod.name_any());
-                    continue;
-                }
-                info!(
-                    "unpatching statefulset {}/{} for native",
-                    statefulset
-                        .metadata
-                        .namespace
-                        .as_deref()
-                        .unwrap_or_default(),
-                    statefulset.metadata.name.as_deref().unwrap_or_default()
-                );
-                statefulset_api
-                    .patch(
-                        statefulset.metadata.name.as_ref().unwrap(),
-                        &PatchParams::apply("leaksignal.com").force(),
-                        &Patch::Apply(json!({
-                            "apiVersion": "apps/v1",
-                            "kind": "StatefulSet",
-                        })),
-                    )
-                    .await?;
-                let uid = statefulset.metadata.uid.clone().unwrap();
-                statefulsets.remove(&uid);
-            } else {
-                unreachable!();
             }
         }
 

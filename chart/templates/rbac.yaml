@@ -28,6 +28,7 @@ rules:
   - deployments
   - replicasets
   - statefulsets
+  - daemonsets
   verbs:
   - list
   - get
@@ -55,6 +56,16 @@ rules:
   - update
   - patch
   - delete
+{{ if .Values.rbacArgoRollout }}
+- apiGroups: ["argoproj.io"]
+  resources:
+  - rollouts
+  verbs:
+  - list
+  - get
+  - patch
+  - update
+{{ end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

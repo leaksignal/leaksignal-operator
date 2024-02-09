@@ -76,6 +76,7 @@
         }
       },
       "rbacEnabled": { "type": "boolean" },
+      "rbacArgoRollout": { "type": "boolean" },
       "resources": {
         "description": "Resource requests and limits",
         "type": "object"

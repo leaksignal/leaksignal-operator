@@ -66,6 +66,9 @@ spec:
                 istioName:
                   type: string
                   description: If set, use an alternate name for created EnvoyFilter objects, to allow multiple LeaksignalIstio objects in one namespace.
+                nativeRepo:
+                  type: string
+                  description: Default is `leaksignal/istio-proxy`. If no tag is specified, it is inferred from the existing proxy image on each given pod.
                 workloadSelector:
                   type: object
                   description: Pod selector for workloads.
