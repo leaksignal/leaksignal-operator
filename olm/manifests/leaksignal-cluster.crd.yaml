@@ -37,7 +37,7 @@ spec:
                   description: Hostname of upstream location to send metrics to. Default is `ingestion.app.leaksignal.com`.
                 proxyPrefix:
                   type: string
-                  description: Prefix of binary to pull. Defaults to `s3/leakproxy`. For LeakAgent deployments, use `proxy`.
+                  description: Deprecated. Unused.
                 tls:
                   type: boolean
                   description: If `true` (default), TLS/HTTPS is used for telemetry upload and downloading LeakSignal Proxy. LeakAgent is usually `false`.
@@ -66,6 +66,12 @@ spec:
                 nativeRepo:
                   type: string
                   description: Default is `leaksignal/istio-proxy`. If no tag is specified, it is inferred from the existing proxy image on each given pod.
+                proxyPullLocation:
+                  type: string
+                  description: Format `https?://domain(:port)?/`. Defaults to `https://leakproxy.s3.us-west-2.amazonaws.com/`.
+                nativeProxyMemoryLimit:
+                  type: string
+                  description: Alternative memory limit for Istio sidecars running native modules. Useful to mitigate a surge of memory usage when loading the proxy.
                 workloadSelector:
                   type: object
                   description: Pod selector for workloads.
