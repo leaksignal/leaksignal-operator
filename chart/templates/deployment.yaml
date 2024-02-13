@@ -67,6 +67,9 @@ spec:
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
+        volumeMounts:
+        - name: proxy-store
+          mountPath: /proxy
 {{ if and .Values.imageCredentials .Values.imageCredentials.username .Values.imageCredentials.password }}
       imagePullSecrets:
       - name: {{ include "leaksignal.name" . }}-image-secret
@@ -74,3 +77,6 @@ spec:
       {{ if .Values.rbacEnabled }}
       serviceAccountName: {{ include "leaksignal.name" . }}
       {{ end }}
+      volumes:
+      - name: proxy-store
+        emptyDir: {}

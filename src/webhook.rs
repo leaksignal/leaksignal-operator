@@ -1,21 +1,106 @@
-use std::{borrow::Cow, convert::Infallible, net::SocketAddr};
+use std::{borrow::Cow, collections::BTreeMap, convert::Infallible, net::SocketAddr};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
-use json_patch::{PatchOperation, ReplaceOperation};
-use k8s_openapi::api::{admissionregistration::v1::MutatingWebhookConfiguration, core::v1::Pod};
+use json_patch::{AddOperation, PatchOperation, ReplaceOperation};
+use k8s_openapi::api::{
+    admissionregistration::v1::MutatingWebhookConfiguration,
+    core::v1::{Pod, Secret, Service},
+};
 use kube::{
-    api::{ListParams, PatchParams},
-    core::admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
+    api::{ListParams, PatchParams, PostParams},
+    core::{
+        admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
+        ObjectMeta,
+    },
     Api, Client, ResourceExt,
 };
 use log::{error, info, warn};
+use rcgen::{Certificate, CertificateParams};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use warp::{
     reply::{self, Reply},
     Filter,
 };
 
-use crate::{ClusterLeaksignalIstio, Error, LeaksignalIstio, SecretData};
+use crate::{ClusterLeaksignalIstio, Error, LeaksignalIstio};
+
+const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
+
+#[derive(Serialize, Deserialize)]
+pub struct SecretData {
+    pub key: Vec<u8>,
+    pub cert: Vec<u8>,
+}
+
+impl TryFrom<Secret> for SecretData {
+    type Error = Error;
+
+    fn try_from(mut value: Secret) -> Result<Self, Self::Error> {
+        Ok(SecretData {
+            key: value
+                .data
+                .as_mut()
+                .and_then(|x| x.remove("tls.key"))
+                .ok_or_else(|| Error::UserInputError("missing tls.key from secret".to_string()))?
+                .0,
+            cert: value
+                .data
+                .as_mut()
+                .and_then(|x| x.remove("tls.crt"))
+                .ok_or_else(|| Error::UserInputError("missing tls.crt from secret".to_string()))?
+                .0,
+        })
+    }
+}
+
+pub async fn load_cert(client: Client) -> Result<SecretData, Error> {
+    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
+    if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
+        return secret.try_into();
+    };
+
+    let cert = Certificate::from_params(CertificateParams::new(vec![format!(
+        "leaksignal-operator.{}.svc",
+        client.default_namespace()
+    )]))?;
+
+    let mut data = BTreeMap::new();
+    data.insert(
+        "tls.crt".to_string(),
+        k8s_openapi::ByteString(cert.serialize_pem()?.into_bytes()),
+    );
+    data.insert(
+        "tls.key".to_string(),
+        k8s_openapi::ByteString(cert.serialize_private_key_pem().into_bytes()),
+    );
+    let out = secret_api
+        .create(
+            &PostParams::default(),
+            &Secret {
+                data: Some(data),
+                immutable: Some(true),
+                metadata: ObjectMeta {
+                    name: Some(WEBHOOK_SECRET_NAME.to_string()),
+                    namespace: Some(client.default_namespace().to_string()),
+                    ..Default::default()
+                },
+                type_: Some("kubernetes.io/tls".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    match out {
+        Ok(out) => out.try_into(),
+        Err(e) => {
+            if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
+                return secret.try_into();
+            };
+            Err(e.into())
+        }
+    }
+}
 
 pub async fn prepare_webhook(client: Client, secret: &SecretData) -> Result<(), Error> {
     let api: Api<MutatingWebhookConfiguration> = Api::all(client.clone());
@@ -132,7 +217,7 @@ async fn mutate_handler(body: AdmissionReview<Pod>) -> Result<impl Reply, Infall
     Ok(reply::json(&res.into_review()))
 }
 
-async fn mutate(res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, Error> {
+async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, Error> {
     if !obj
         .metadata
         .annotations
@@ -198,25 +283,76 @@ async fn mutate(res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, 
         return Ok(res);
     };
 
-    if !crd.native {
-        // not a native deployment
-        return Ok(res);
+    let mut patches = vec![];
+
+    if !spec
+        .volumes
+        .as_ref()
+        .map(|x| x.iter().any(|x| x.name == "leaksignal-proxy"))
+        .unwrap_or_default()
+    {
+        let services: Api<Service> = Api::default_namespaced(client.clone());
+        let service = services
+            .get_opt("leaksignal-operator")
+            .await?
+            .ok_or_else(|| {
+                Error::UserInputError(format!(
+                    "missing leaksignal-operator service, cannot assign NFS"
+                ))
+            })?;
+        let cluster_ip = service
+            .spec
+            .as_ref()
+            .and_then(|x| x.cluster_ip.as_deref())
+            .ok_or_else(|| {
+                Error::UserInputError(format!(
+                    "leaksignal-operator service has no clusterIP, cannot assign NFS"
+                ))
+            })?;
+        patches.extend([
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/volumes/0"),
+                value: json!({
+                    "name": "leaksignal-proxy",
+                    "nfs": {
+                        "server": cluster_ip,
+                        "path": "/",
+                        "readOnly": true,
+                    },
+                }),
+            }),
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{istio_container_idx}/volumeMounts/0"),
+                value: json!({
+                    "name": "leaksignal-proxy",
+                    "mountPath": "/ls-proxy/",
+                }),
+            }),
+        ]);
     }
 
-    let new_image = if crd.native_repo.contains(':') {
-        Cow::Borrowed(&*crd.native_repo)
-    } else {
-        Cow::Owned(format!("{}:{tag}", crd.native_repo))
-    };
+    if crd.native {
+        let new_image = if crd.native_repo.contains(':') {
+            Cow::Borrowed(&*crd.native_repo)
+        } else {
+            Cow::Owned(format!("{}:{tag}", crd.native_repo))
+        };
 
-    Ok(res.with_patch(json_patch::Patch(vec![
-        PatchOperation::Replace(ReplaceOperation {
-            path: format!("/spec/containers/{istio_container_idx}/image"),
-            value: serde_json::Value::String(new_image.into_owned()),
-        }),
-        PatchOperation::Replace(ReplaceOperation {
-            path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
-            value: serde_json::Value::String(crd.native_proxy_memory_limit),
-        }),
-    ]))?)
+        patches.extend([
+            PatchOperation::Replace(ReplaceOperation {
+                path: format!("/spec/containers/{istio_container_idx}/image"),
+                value: serde_json::Value::String(new_image.into_owned()),
+            }),
+            PatchOperation::Replace(ReplaceOperation {
+                path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
+                value: serde_json::Value::String(crd.native_proxy_memory_limit),
+            }),
+        ]);
+    }
+
+    if !patches.is_empty() {
+        res = res.with_patch(json_patch::Patch(patches))?;
+    }
+
+    Ok(res)
 }

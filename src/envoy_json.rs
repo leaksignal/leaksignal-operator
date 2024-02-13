@@ -1,12 +1,15 @@
+use std::path::Path;
+
 use serde_json::{json, Value};
-use url::Url;
 
 use crate::{CRDValues, Error, GrpcMode};
+
+const PATH_PREFIX: &str = "/ls-proxy/";
 
 fn create_plugin_config(
     is_streaming: bool,
     values: &CRDValues,
-    proxy_url: &Url,
+    path: &Path,
 ) -> Result<Value, Error> {
     let mut configuration = match values.grpc_mode {
         GrpcMode::Envoy => format!(
@@ -41,32 +44,19 @@ upstream_url: {scheme}{}{port}",
         &values.proxy_hash[..values.proxy_hash.len().min(7)]
     );
 
-    let mut proxy_url = proxy_url.clone();
-    let vm_config = if values.native {
-        proxy_url.path_segments_mut().unwrap().push("leaksignal.so");
+    let path = Path::new(PATH_PREFIX).join(path);
 
+    let vm_config = if values.native {
         json!({
           "runtime": "envoy.wasm.runtime.dyn",
           "vm_id": vm_id,
           "code": {
-            "remote": {
-              "http_uri": {
-                "uri": proxy_url,
-                "timeout": "120s",
-                "cluster": "leaksignal_pull"
-              },
-              "sha256": values.proxy_hash,
-              "retry_policy": {
-                "num_retries": 30
-              }
-            }
-          }
+            "local": {
+              "filename": path,
+            },
+          },
         })
     } else {
-        proxy_url
-            .path_segments_mut()
-            .unwrap()
-            .push("leaksignal.wasm");
         json!({
           "runtime": "envoy.wasm.runtime.v8",
           "vm_id": vm_id,
@@ -83,18 +73,10 @@ upstream_url: {scheme}{}{port}",
             ]
           },
           "code": {
-            "remote": {
-              "http_uri": {
-                "uri": proxy_url,
-                "timeout": "120s",
-                "cluster": "leaksignal_pull"
-              },
-              "sha256": values.proxy_hash,
-              "retry_policy": {
-                "num_retries": 30
-              }
-            }
-          }
+            "local": {
+              "filename": path,
+            },
+          },
         })
     };
 
@@ -154,23 +136,12 @@ fn create_transport_socket(location: &str, ca_bundle: &str) -> Value {
 }
 
 /// creates json that will be applied to EnvoyFilter
-pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Result<Value, Error> {
-    let mut proxy_url: Url = values
-        .proxy_pull_location
-        .parse()
-        .map_err(|e| Error::UserInputError(format!("failed to parse proxyPullLocation: {e:?}")))?;
-    if proxy_url.cannot_be_a_base()
-        || (proxy_url.scheme() != "https" && proxy_url.scheme() != "http")
-    {
-        return Err(Error::UserInputError(
-            "proxyPullLocation must be a http(s) URL".to_string(),
-        ));
-    }
-    proxy_url
-        .path_segments_mut()
-        .unwrap()
-        .push(&values.proxy_version);
-
+pub fn create_json(
+    namespace: &str,
+    owner: &OwnerInfo,
+    values: &CRDValues,
+    path: &Path,
+) -> Result<Value, Error> {
     let mut infra_cluster = json!({
       "name": "leaksignal_infra",
       "type": "STRICT_DNS",
@@ -197,42 +168,10 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Re
         ]
       },
     });
-    if values.tls {
+    if values.tls && !values.native {
         infra_cluster.as_object_mut().unwrap().insert(
             "transport_socket".to_string(),
             create_transport_socket(&values.upstream_location, &values.ca_bundle),
-        );
-    }
-
-    let mut pull_cluster = json!({
-      "name": "leaksignal_pull",
-      "type": "STRICT_DNS",
-      "dns_lookup_family": "V4_PREFERRED",
-      "lb_policy": "ROUND_ROBIN",
-      "load_assignment": {
-        "cluster_name": "leaksignal_pull0",
-        "endpoints": [
-          {
-            "lb_endpoints": [
-              {
-                "endpoint": {
-                  "address": {
-                    "socket_address": {
-                      "address": proxy_url.host_str(),
-                      "port_value": proxy_url.port_or_known_default(),
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        ]
-      },
-    });
-    if proxy_url.scheme() == "https" {
-        pull_cluster.as_object_mut().unwrap().insert(
-            "transport_socket".to_string(),
-            create_transport_socket(proxy_url.host_str().unwrap_or_default(), &values.ca_bundle),
         );
     }
 
@@ -257,7 +196,7 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Re
               "name": "leaksignal-proxy",
               "typed_config": {
                 "@type": "type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm",
-                "config": create_plugin_config(false, values, &proxy_url)?,
+                "config": create_plugin_config(false, values, path)?,
               }
             }
           }
@@ -270,16 +209,6 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Re
           "patch": {
             "operation": "ADD",
             "value": infra_cluster,
-          }
-        }),
-        json!({
-          "applyTo": "CLUSTER",
-          "match": {
-            "context": "ANY"
-          },
-          "patch": {
-            "operation": "ADD",
-            "value": pull_cluster,
           }
         }),
     ];
@@ -303,7 +232,7 @@ pub fn create_json(namespace: &str, owner: &OwnerInfo, values: &CRDValues) -> Re
               "name": "leaksignal-proxy-stream",
               "typed_config": {
                 "@type": "type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm",
-                "config": create_plugin_config(true, values, &proxy_url)?,
+                "config": create_plugin_config(true, values, path)?,
               }
             }
           }

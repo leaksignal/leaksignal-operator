@@ -2,30 +2,31 @@
 
 mod envoy_json;
 mod native;
+mod proxy_mgr;
 mod webhook;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
-use k8s_openapi::api::core::v1::{Namespace, Secret};
+use k8s_openapi::api::core::v1::Namespace;
 use kube::{
     api::{DeleteParams, ListParams, Patch, PatchParams, PostParams},
     client::Client,
-    core::{admission::SerializePatchError, DynamicObject, GroupVersionKind, ObjectMeta},
+    core::{admission::SerializePatchError, DynamicObject, GroupVersionKind},
     discovery::ApiResource,
     runtime::{controller::Action, watcher::Config, Controller},
     Api, CustomResource, Resource, ResourceExt,
 };
 use log::{error, info, warn};
-use rcgen::{Certificate, CertificateParams};
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fmt::{Debug, Write},
     sync::Arc,
 };
 use tokio::time::Duration;
+use url::Url;
 
 use crate::envoy_json::create_json;
 
@@ -78,6 +79,10 @@ pub enum Error {
     CertError(#[from] rcgen::Error),
     #[error("Failed to serialize patch: {0}")]
     PatchError(#[from] SerializePatchError),
+    #[error("Failed to fetch via HTTP: {0}")]
+    HttpError(#[from] reqwest::Error),
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -430,7 +435,32 @@ where
     if !is_deleted {
         info!("patching {}", values.istio_name);
 
-        let filter = create_json(namespace, owner, values)?;
+        let mut proxy_url: Url = values.proxy_pull_location.parse().map_err(|e| {
+            Error::UserInputError(format!("failed to parse proxyPullLocation: {e:?}"))
+        })?;
+        if proxy_url.cannot_be_a_base()
+            || (proxy_url.scheme() != "https" && proxy_url.scheme() != "http")
+        {
+            return Err(Error::UserInputError(
+                "proxyPullLocation must be a http(s) URL".to_string(),
+            ));
+        }
+        proxy_url
+            .path_segments_mut()
+            .unwrap()
+            .push(&values.proxy_version);
+        if values.native {
+            proxy_url.path_segments_mut().unwrap().push("leaksignal.so");
+        } else {
+            proxy_url
+                .path_segments_mut()
+                .unwrap()
+                .push("leaksignal.wasm");
+        }
+        let path =
+            proxy_mgr::check_or_add_proxy(&values.proxy_hash, values.native, &proxy_url).await?;
+
+        let filter = create_json(namespace, owner, values, &path)?;
         let mut new: DynamicObject = serde_json::from_value(filter)
             .map_err(|e| Error::UserInputError(format!("failed to parse new envoyfilter: {e}")))?;
 
@@ -459,83 +489,6 @@ where
     Ok(())
 }
 
-const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
-
-#[derive(Serialize, Deserialize)]
-pub struct SecretData {
-    pub key: Vec<u8>,
-    pub cert: Vec<u8>,
-}
-
-impl TryFrom<Secret> for SecretData {
-    type Error = Error;
-
-    fn try_from(mut value: Secret) -> Result<Self, Self::Error> {
-        Ok(SecretData {
-            key: value
-                .data
-                .as_mut()
-                .and_then(|x| x.remove("tls.key"))
-                .ok_or_else(|| Error::UserInputError("missing tls.key from secret".to_string()))?
-                .0,
-            cert: value
-                .data
-                .as_mut()
-                .and_then(|x| x.remove("tls.crt"))
-                .ok_or_else(|| Error::UserInputError("missing tls.crt from secret".to_string()))?
-                .0,
-        })
-    }
-}
-
-async fn load_cert(client: Client) -> Result<SecretData, Error> {
-    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
-    if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
-        return secret.try_into();
-    };
-
-    let cert = Certificate::from_params(CertificateParams::new(vec![format!(
-        "leaksignal-operator.{}.svc",
-        client.default_namespace()
-    )]))?;
-
-    let mut data = BTreeMap::new();
-    data.insert(
-        "tls.crt".to_string(),
-        k8s_openapi::ByteString(cert.serialize_pem()?.into_bytes()),
-    );
-    data.insert(
-        "tls.key".to_string(),
-        k8s_openapi::ByteString(cert.serialize_private_key_pem().into_bytes()),
-    );
-    let out = secret_api
-        .create(
-            &PostParams::default(),
-            &Secret {
-                data: Some(data),
-                immutable: Some(true),
-                metadata: ObjectMeta {
-                    name: Some(WEBHOOK_SECRET_NAME.to_string()),
-                    namespace: Some(client.default_namespace().to_string()),
-                    ..Default::default()
-                },
-                type_: Some("kubernetes.io/tls".to_string()),
-                ..Default::default()
-            },
-        )
-        .await;
-
-    match out {
-        Ok(out) => out.try_into(),
-        Err(e) => {
-            if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
-                return secret.try_into();
-            };
-            Err(e.into())
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), kube::Error> {
     env_logger::Builder::new()
@@ -543,7 +496,7 @@ async fn main() -> Result<(), kube::Error> {
         .init();
     let client = Client::try_default().await?;
 
-    let certificate = match load_cert(client.clone()).await {
+    let certificate = match webhook::load_cert(client.clone()).await {
         Ok(x) => x,
         Err(e) => {
             error!("failed to create/load webhook TLS cert: {e:?}");
@@ -566,6 +519,7 @@ async fn main() -> Result<(), kube::Error> {
             }
         }
     });
+    tokio::spawn(proxy_mgr::run_nfs_server());
 
     // Configure your controllers
     let leaksignal_istio_controller = Controller::new(Api::all(client.clone()), Config::default());

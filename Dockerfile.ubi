@@ -1,4 +1,4 @@
-FROM lukemathwalker/cargo-chef:0.1.61-rust-1.70-slim-buster AS planner
+FROM lukemathwalker/cargo-chef:0.1.62-rust-1.74-slim-buster AS planner
 WORKDIR /plan
 
 COPY ./src ./src
@@ -7,7 +7,7 @@ COPY ./Cargo.toml .
 
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM lukemathwalker/cargo-chef:0.1.61-rust-1.70-buster AS builder
+FROM lukemathwalker/cargo-chef:0.1.62-rust-1.74-slim-buster AS builder
 ARG BUILD_MODE=release
 
 WORKDIR /build
