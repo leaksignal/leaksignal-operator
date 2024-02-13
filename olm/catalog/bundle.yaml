@@ -1,18 +1,18 @@
 schema: olm.bundle
 package: leaksignal-operator
-name: leaksignal-operator.v1.5.0
+name: leaksignal-operator.v1.6.0
 
-image: docker.io/leaksignal/leaksignal-operator-olm:1.5.0
+image: docker.io/leaksignal/leaksignal-operator-olm:1.6.0
 relatedImages:
  - name: bundle
-   image: docker.io/leaksignal/leaksignal-operator-olm:1.5.0
+   image: docker.io/leaksignal/leaksignal-operator-olm:1.6.0
  - name: operator
-   image: docker.io/leaksignal/leaksignal-operator:1.5.0
+   image: docker.io/leaksignal/leaksignal-operator:1.6.0
 properties:
 - type: olm.package
   value:
     packageName: leaksignal-operator
-    version: 1.5.0
+    version: 1.6.0
 - type: olm.gvk
   value:
     group: leaksignal.com
