@@ -80,6 +80,10 @@
       "resources": {
         "description": "Resource requests and limits",
         "type": "object"
+      },
+      "priority": {
+        "type": "integer",
+        "description": "Priority values for operator pod"
       }
     }
   }

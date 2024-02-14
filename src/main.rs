@@ -4,6 +4,7 @@ mod envoy_json;
 mod native;
 mod proxy_mgr;
 mod webhook;
+mod pod_scan;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
@@ -63,7 +64,7 @@ fn default_proxy_pull_location() -> String {
 }
 
 fn default_native_proxy_memory_limit() -> String {
-    "3Gi".to_string()
+    "2Gi".to_string()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +121,8 @@ pub struct CRDValues {
     #[serde(default = "default_true")]
     #[serde(alias = "refresh_pods_on_update")]
     pub refresh_pods_on_update: bool,
+    #[serde(default = "default_true")]
+    pub refresh_pods_on_stale: bool,
     #[serde(default)]
     pub grpc_mode: GrpcMode,
     #[serde(default = "default_true")]
@@ -520,6 +523,7 @@ async fn main() -> Result<(), kube::Error> {
         }
     });
     tokio::spawn(proxy_mgr::run_nfs_server());
+    tokio::spawn(pod_scan::run_pod_scan(client.clone()));
 
     // Configure your controllers
     let leaksignal_istio_controller = Controller::new(Api::all(client.clone()), Config::default());

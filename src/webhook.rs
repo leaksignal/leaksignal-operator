@@ -270,13 +270,24 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
         })
         .map(|x| x.spec.inner.clone());
     if applicable_crd.is_none() {
-        applicable_crd = cluster_api
+        let apis = cluster_api
             .list(&ListParams::default())
             .await?
-            .items
-            .into_iter()
-            .next()
-            .map(|x| x.spec.inner);
+            .items;
+        applicable_crd = 
+            apis.iter()
+            .find(|x| x.spec
+                .inner
+                .workload_selector
+                .labels
+                .iter()
+                .all(|(k, v)| obj.labels().get(k) == Some(v)))
+            .or_else(|| {
+                apis
+                    .iter()
+                    .find(|x| x.spec.inner.workload_selector.labels.is_empty())
+            })
+            .map(|x| x.spec.inner.clone());
     }
     let Some(crd) = applicable_crd else {
         // no leaksignal deployment
@@ -329,6 +340,13 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
                 }),
             }),
         ]);
+    }
+
+    if obj.metadata.labels.as_ref().and_then(|x| x.get("ls-deployed").map(|x| &**x)) != Some("1") {
+        patches.push(PatchOperation::Add(AddOperation {
+            path: format!("/metadata/labels/ls-deployed"),
+            value: json!("1"),
+        }));
     }
 
     if crd.native {

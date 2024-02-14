@@ -11,3 +11,4 @@ resources:
   limits:
     memory: 1Gi
     cpu: 1.0
+priority: 10000

@@ -6,7 +6,7 @@ metadata:
   annotations:
     capabilities: Full Lifecycle
     categories: Security
-    containerImage: docker.io/leaksignal/leaksignal-operator@sha256:3031208c57b9fd8a367e3378b05896feae03e6c358a21259918796e9b0127ec1
+    containerImage: docker.io/leaksignal/leaksignal-operator@sha256:9cf277a88b8c4370593e88e98c844f1b726141bfa0e11bd5b661e18f7377f475
     createdAt: '2024-01-31T00:00:00Z'
     support: LeakSignal Inc. https://leaksignal.com
     description: Secure your data in seconds with the LeakSignal Operator.
@@ -60,7 +60,7 @@ spec:
   version: 1.6.0
   relatedImages:
   - name: operator
-    image: docker.io/leaksignal/leaksignal-operator@sha256:3031208c57b9fd8a367e3378b05896feae03e6c358a21259918796e9b0127ec1
+    image: docker.io/leaksignal/leaksignal-operator@sha256:9cf277a88b8c4370593e88e98c844f1b726141bfa0e11bd5b661e18f7377f475
   icon:
   - base64data: |-
                 iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAsTAAALEwEAmpwYAAADVklEQVRIiaVW34tVZRRda+1v7ji31PGUM1D+IBR9EJVBmTSTIC18ytfwwfwBik8K0kODov+AT6kQUYGiRfQ0Q
@@ -87,21 +87,43 @@ spec:
   install:
     strategy: deployment
     spec:
+      permissions:
+      - serviceAccountName: leaksignal-operator
+        rules:
+        - apiGroups: [""]
+          resources:
+          - secrets
+          verbs:
+          - get
+          - watch
+          - list
+          - create
+          - update
+          - patch
+          - delete
+
       clusterPermissions:
       - rules:
         - apiGroups: [""]
           resources:
-          - namespaces
           - pods
           verbs:
           - list
           - get
           - delete
+        - apiGroups: [""]
+          resources:
+          - namespaces
+          - services
+          verbs:
+          - list
+          - get
         - apiGroups: ["apps"]
           resources:
           - deployments
           - replicasets
           - statefulsets
+          - daemonsets
           verbs:
           - list
           - get
@@ -129,6 +151,28 @@ spec:
           - update
           - patch
           - delete
+        - apiGroups:
+          - admissionregistration.k8s.io
+          resources:
+          - mutatingwebhookconfigurations
+          verbs:
+          - get
+          - watch
+          - list
+          - create
+          - update
+          - patch
+          - delete
+          resourceNames:
+          - z-leaksignal-operator
+        - apiGroups: ["argoproj.io"]
+          resources:
+          - rollouts
+          verbs:
+          - list
+          - get
+          - patch
+          - update
         serviceAccountName: leaksignal-operator
       deployments:
       - name: leaksignal-operator
@@ -141,10 +185,20 @@ spec:
             metadata:
               labels:
                 app: leaksignal-operator
+                ls-native: excluded
             spec:
+              priorityClassName: leaksignal-operator
               containers:
               - name: leaksignal-operator
-                image: docker.io/leaksignal/leaksignal-operator@sha256:3031208c57b9fd8a367e3378b05896feae03e6c358a21259918796e9b0127ec1
+                image: docker.io/leaksignal/leaksignal-operator@sha256:9cf277a88b8c4370593e88e98c844f1b726141bfa0e11bd5b661e18f7377f475
+                volumeMounts:
+                - name: proxy-store
+                  mountPath: /proxy
+                ports:
+                - containerPort: 8443
+                  name: webhook-tls
+                - containerPort: 2049
+                  name: nfs-proxy
                 resources:
                   requests:
                     memory: 256Mi
@@ -153,6 +207,9 @@ spec:
                     memory: 1Gi
                     cpu: 1.0
               serviceAccountName: leaksignal-operator
+              volumes:
+              - name: proxy-store
+                emptyDir: {}
   installModes:
   - supported: false
     type: OwnNamespace

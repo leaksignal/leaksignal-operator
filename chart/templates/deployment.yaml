@@ -26,6 +26,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      priorityClassName: leaksignal-operator
       {{- with .Values.schedulerName }}
       schedulerName: "{{ . }}"
       {{- end }}
@@ -36,9 +37,6 @@ spec:
       {{- with .Values.hostAliases }}
       hostAliases:
         {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.priorityClassName }}
-      priorityClassName: {{ . }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -60,10 +58,12 @@ spec:
       - name: {{ include "leaksignal.name" . }}
         image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
         imagePullPolicy: "Always"
-        {{- with .Values.resources }}
         ports:
         - containerPort: 8443
           name: webhook-tls
+        - containerPort: 2049
+          name: nfs-proxy
+        {{- with .Values.resources }}
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
