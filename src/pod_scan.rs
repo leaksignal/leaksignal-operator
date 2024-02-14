@@ -1,5 +1,6 @@
 use std::{collections::HashSet, time::Duration};
 
+use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Client, Api, api::{ListParams, DeleteParams}, ResourceExt};
 use log::{info, error};
@@ -28,6 +29,11 @@ async fn check_pod(client: Client, pod: Pod, crd: &CRDValues, claimed_pods: &mut
         .unwrap_or_default()
     {
         return Ok(());
+    }
+    if let Some(time) = &pod.metadata.deletion_timestamp {
+        if time.0 < Utc::now() {
+            return Ok(());
+        }
     }
     let ns = pod.metadata.namespace.as_deref().unwrap_or("default");
     let pod_api: Api<Pod> = Api::namespaced(client, ns);
