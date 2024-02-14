@@ -2,10 +2,13 @@ use std::{collections::HashSet, time::Duration};
 
 use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
-use kube::{Client, Api, api::{ListParams, DeleteParams}, ResourceExt};
-use log::{info, error};
+use kube::{
+    api::{DeleteParams, ListParams},
+    Api, Client, ResourceExt,
+};
+use log::{error, info};
 
-use crate::{ClusterLeaksignalIstio, LeaksignalIstio, Error, CRDValues};
+use crate::{CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio};
 
 pub async fn run_pod_scan(client: Client) {
     let mut duration_secs = 5;
@@ -20,7 +23,12 @@ pub async fn run_pod_scan(client: Client) {
     }
 }
 
-async fn check_pod(client: Client, pod: Pod, crd: &CRDValues, claimed_pods: &mut HashSet<(String, String)>) -> Result<(), Error> {
+async fn check_pod(
+    client: Client,
+    pod: Pod,
+    crd: &CRDValues,
+    claimed_pods: &mut HashSet<(String, String)>,
+) -> Result<(), Error> {
     if !pod
         .metadata
         .annotations
@@ -44,25 +52,61 @@ async fn check_pod(client: Client, pod: Pod, crd: &CRDValues, claimed_pods: &mut
     }
     claimed_pods.insert(key);
 
-    if pod.metadata.labels.as_ref().and_then(|x| x.get("ls-deployed").map(|x| &**x)) != Some("1") {
-        info!("restarting pod {}/{} due to no leaksignal deployed and should be", pod.namespace().as_deref().unwrap_or_default(), pod.name_any());
-        pod_api.delete(&pod.name_any(), &DeleteParams::default()).await?;
+    if pod
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|x| x.get("ls-deployed").map(|x| &**x))
+        != Some("1")
+    {
+        info!(
+            "restarting pod {}/{} due to no leaksignal deployed and should be",
+            pod.namespace().as_deref().unwrap_or_default(),
+            pod.name_any()
+        );
+        pod_api
+            .delete(&pod.name_any(), &DeleteParams::default())
+            .await?;
         return Ok(());
     }
 
     if crd.native {
-        let image = pod.spec.as_ref().and_then(|x| x.containers.iter().find(|x| x.name == "istio-proxy")).and_then(|x| x.image.as_deref());
+        let image = pod
+            .spec
+            .as_ref()
+            .and_then(|x| x.containers.iter().find(|x| x.name == "istio-proxy"))
+            .and_then(|x| x.image.as_deref());
         let repo = image.and_then(|x| x.split_once(':')).map(|x| x.0);
-        if (crd.native_repo.contains(':') && image != Some(&crd.native_repo)) || Some(&*crd.native_repo) != repo {
-            info!("restarting pod {}/{} due to image out-of-sync", pod.namespace().as_deref().unwrap_or_default(), pod.name_any());
-            pod_api.delete(&pod.name_any(), &DeleteParams::default()).await?;
+        let has_tag = crd.native_repo.contains(':');
+        if (has_tag && image != Some(&crd.native_repo))
+            || (!has_tag && Some(&*crd.native_repo) != repo)
+        {
+            info!(
+                "restarting pod {}/{} due to image out-of-sync",
+                pod.namespace().as_deref().unwrap_or_default(),
+                pod.name_any()
+            );
+            pod_api
+                .delete(&pod.name_any(), &DeleteParams::default())
+                .await?;
             return Ok(());
         }
     }
-    let volume_present = pod.spec.as_ref().and_then(|x| x.volumes.as_ref()).and_then(|x| x.iter().find(|x| x.name == "leaksignal-proxy")).is_some();
+    let volume_present = pod
+        .spec
+        .as_ref()
+        .and_then(|x| x.volumes.as_ref())
+        .and_then(|x| x.iter().find(|x| x.name == "leaksignal-proxy"))
+        .is_some();
     if !volume_present {
-        info!("restarting pod {}/{} due to volume out-of-sync", pod.namespace().as_deref().unwrap_or_default(), pod.name_any());
-        pod_api.delete(&pod.name_any(), &DeleteParams::default()).await?;
+        info!(
+            "restarting pod {}/{} due to volume out-of-sync",
+            pod.namespace().as_deref().unwrap_or_default(),
+            pod.name_any()
+        );
+        pod_api
+            .delete(&pod.name_any(), &DeleteParams::default())
+            .await?;
         return Ok(());
     }
     Ok(())
@@ -84,7 +128,7 @@ async fn do_pod_scan(client: Client) -> Result<(), Error> {
             check_pod(client.clone(), pod, &crd.spec.inner, &mut claimed_pods).await?;
         }
     }
-    
+
     let pod_api: Api<Pod> = Api::all(client.clone());
     for crd in cluster_crd.list(&ListParams::default()).await? {
         if !crd.spec.inner.refresh_pods_on_stale {
@@ -95,6 +139,6 @@ async fn do_pod_scan(client: Client) -> Result<(), Error> {
             check_pod(client.clone(), pod, &crd.spec.inner, &mut claimed_pods).await?;
         }
     }
-    
+
     Ok(())
 }

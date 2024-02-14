@@ -240,7 +240,9 @@ pub fn create_json(
     }
 
     let mut workload_selector = values.workload_selector.clone();
-    workload_selector.labels.insert("ls-deployed".to_string(), "1".to_string());
+    workload_selector
+        .labels
+        .insert("ls-deployed".to_string(), "1".to_string());
 
     Ok(json!({
       "apiVersion": "networking.istio.io/v1alpha3",

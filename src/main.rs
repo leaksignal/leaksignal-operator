@@ -2,9 +2,9 @@
 
 mod envoy_json;
 mod native;
+mod pod_scan;
 mod proxy_mgr;
 mod webhook;
-mod pod_scan;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
