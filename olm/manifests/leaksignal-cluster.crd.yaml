@@ -53,6 +53,9 @@ spec:
                   type: boolean
                   description: "For WASM mode, redeploys all pods with Istio sidecars affected by a LeakSignal Proxy upgrade. This provides more consistent behavior. \
                   Default is `true`."
+                refreshPodsOnStale:
+                  type: boolean
+                  description: "Detects pods that should have leaksignal deployed, but dont, and restarts them."
                 grpcMode:
                   type: string
                   enum: ["default", "envoy"]
