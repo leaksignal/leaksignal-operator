@@ -28,4 +28,4 @@ helm push ./helm_upload/*.tgz oci://registry-1.docker.io/leaksignal
 
 rm -rf helm_upload
 
-./olm/publish_bundle.sh $TAG
+# ./olm/publish_bundle.sh $TAG
