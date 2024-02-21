@@ -2,11 +2,11 @@
 apiVersion: operators.coreos.com/v1alpha1
 kind: ClusterServiceVersion
 metadata:
-  name: leaksignal-operator.v1.6.2
+  name: leaksignal-operator.v1.6.3
   annotations:
     capabilities: Full Lifecycle
     categories: Security
-    containerImage: docker.io/leaksignal/leaksignal-operator@sha256:e98c702ceb409ff4ac00b13407a593a80d706777d8f5db0134fa60d2d81522f1
+    containerImage: docker.io/leaksignal/leaksignal-operator@sha256:c9d4a2cc34af057fbe3618c931ecfafeb9b5b1f84dc950889682519642925eed
     createdAt: '2024-01-31T00:00:00Z'
     support: LeakSignal Inc. https://leaksignal.com
     description: Secure your data in seconds with the LeakSignal Operator.
@@ -57,10 +57,10 @@ spec:
   links:
   - name: Documentation
     url: https://www.leaksignal.com/docs/Operator/Getting%20Started
-  version: 1.6.2
+  version: 1.6.3
   relatedImages:
   - name: operator
-    image: docker.io/leaksignal/leaksignal-operator@sha256:e98c702ceb409ff4ac00b13407a593a80d706777d8f5db0134fa60d2d81522f1
+    image: docker.io/leaksignal/leaksignal-operator@sha256:c9d4a2cc34af057fbe3618c931ecfafeb9b5b1f84dc950889682519642925eed
   icon:
   - base64data: |-
                 iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAsTAAALEwEAmpwYAAADVklEQVRIiaVW34tVZRRda+1v7ji31PGUM1D+IBR9EJVBmTSTIC18ytfwwfwBik8K0kODov+AT6kQUYGiRfQ0Q
@@ -190,7 +190,7 @@ spec:
               priorityClassName: leaksignal-operator
               containers:
               - name: leaksignal-operator
-                image: docker.io/leaksignal/leaksignal-operator@sha256:e98c702ceb409ff4ac00b13407a593a80d706777d8f5db0134fa60d2d81522f1
+                image: docker.io/leaksignal/leaksignal-operator@sha256:c9d4a2cc34af057fbe3618c931ecfafeb9b5b1f84dc950889682519642925eed
                 volumeMounts:
                 - name: proxy-store
                   mountPath: /proxy
