@@ -360,6 +360,40 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
             Cow::Owned(format!("{}:{tag}", crd.native_repo))
         };
 
+        if container.resources.is_none() {
+            patches.extend([PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{istio_container_idx}/resources"),
+                value: json!({"limits": {"memory": "1Gi"}}),
+            })]);
+        }
+        if container
+            .resources
+            .as_ref()
+            .map(|x| x.limits.is_none())
+            .unwrap_or_default()
+        {
+            patches.extend([PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{istio_container_idx}/resources/limits"),
+                value: json!({"memory": "1Gi"}),
+            })]);
+        }
+        if container
+            .resources
+            .as_ref()
+            .map(|x| {
+                x.limits
+                    .as_ref()
+                    .map(|x| x.get("memory").is_none())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+        {
+            patches.extend([PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
+                value: json!("1Gi"),
+            })]);
+        }
+
         patches.extend([
             PatchOperation::Replace(ReplaceOperation {
                 path: format!("/spec/containers/{istio_container_idx}/image"),
