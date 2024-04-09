@@ -284,7 +284,7 @@ impl CRDValues {
     }
 
     pub async fn apply_native(&self, client: Client, namespace: &str) -> Result<(), Error> {
-        if !self.native {
+        if !self.native || !self.refresh_pods_on_update {
             return Ok(());
         }
 
