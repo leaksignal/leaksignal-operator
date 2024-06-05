@@ -127,7 +127,7 @@ pub struct CRDValues {
     pub grpc_mode: GrpcMode,
     #[serde(default = "default_true")]
     pub enable_streaming: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub native: bool,
     #[serde(default = "default_true")]
     pub fail_open: bool,
