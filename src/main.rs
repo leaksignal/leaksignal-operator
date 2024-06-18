@@ -1,6 +1,7 @@
 #![warn(clippy::dbg_macro, clippy::todo)]
 
 mod envoy_json;
+mod intercept;
 mod native;
 mod pod_scan;
 mod proxy_mgr;
@@ -141,6 +142,8 @@ pub struct CRDValues {
     pub proxy_pull_location: String,
     #[serde(default = "default_native_proxy_memory_limit")]
     pub native_proxy_memory_limit: String,
+    #[serde(default = "default_true")]
+    pub enable_client_interception: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, Default)]
@@ -505,6 +508,19 @@ async fn main() -> Result<(), kube::Error> {
             error!("failed to create/load webhook TLS cert: {e:?}");
             std::process::exit(1);
         }
+    };
+
+    let client_cert = match webhook::load_client_cert(client.clone()).await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("failed to create/load client TLS ca cert: {e:?}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = proxy_mgr::update_client_ca(&client_cert).await {
+        error!("failed to set client TLS ca cert: {e:?}");
+        std::process::exit(1);
     };
 
     if let Err(e) = webhook::prepare_webhook(client.clone(), &certificate).await {

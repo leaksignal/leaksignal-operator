@@ -15,7 +15,7 @@ use kube::{
     Api, Client, ResourceExt,
 };
 use log::{error, info, warn};
-use rcgen::{Certificate, CertificateParams};
+use rcgen::{CertificateParams, KeyPair};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use warp::{
@@ -23,9 +23,10 @@ use warp::{
     Filter,
 };
 
-use crate::{ClusterLeaksignalIstio, Error, LeaksignalIstio};
+use crate::{intercept::GeneratedCA, CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio};
 
 const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
+const CLIENT_SECRET_NAME: &str = "leaksignal-operator-client-data";
 
 #[derive(Serialize, Deserialize)]
 pub struct SecretData {
@@ -54,25 +55,61 @@ impl TryFrom<Secret> for SecretData {
     }
 }
 
+pub async fn load_client_cert(client: Client) -> Result<GeneratedCA, Error> {
+    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
+    if let Some(secret) = secret_api.get_opt(CLIENT_SECRET_NAME).await? {
+        return secret.try_into();
+    };
+
+    let ca = GeneratedCA::generate()?;
+    let out = secret_api
+        .create(
+            &PostParams::default(),
+            &Secret {
+                data: Some(ca.clone().into()),
+                immutable: Some(true),
+                metadata: ObjectMeta {
+                    name: Some(CLIENT_SECRET_NAME.to_string()),
+                    namespace: Some(client.default_namespace().to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+    match out {
+        Ok(out) => out.try_into(),
+        Err(e) => {
+            if let Some(secret) = secret_api.get_opt(CLIENT_SECRET_NAME).await? {
+                return secret.try_into();
+            };
+            Err(e.into())
+        }
+    }
+}
+
 pub async fn load_cert(client: Client) -> Result<SecretData, Error> {
     let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
     if let Some(secret) = secret_api.get_opt(WEBHOOK_SECRET_NAME).await? {
         return secret.try_into();
     };
 
-    let cert = Certificate::from_params(CertificateParams::new(vec![format!(
+    let key_pair = KeyPair::generate()?;
+    let cert = CertificateParams::new(vec![format!(
         "leaksignal-operator.{}.svc",
         client.default_namespace()
-    )]))?;
+    )])?
+    .self_signed(&key_pair)?;
 
     let mut data = BTreeMap::new();
     data.insert(
         "tls.crt".to_string(),
-        k8s_openapi::ByteString(cert.serialize_pem()?.into_bytes()),
+        k8s_openapi::ByteString(cert.pem().into_bytes()),
     );
     data.insert(
         "tls.key".to_string(),
-        k8s_openapi::ByteString(cert.serialize_private_key_pem().into_bytes()),
+        k8s_openapi::ByteString(key_pair.serialize_pem().into_bytes()),
     );
     let out = secret_api
         .create(
@@ -217,7 +254,12 @@ async fn mutate_handler(body: AdmissionReview<Pod>) -> Result<impl Reply, Infall
     Ok(reply::json(&res.into_review()))
 }
 
-async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, Error> {
+async fn mutate_istio(
+    client: &Client,
+    obj: &Pod,
+    crd: &CRDValues,
+    patches: &mut Vec<PatchOperation>,
+) -> Result<(), Error> {
     if !obj
         .metadata
         .annotations
@@ -225,74 +267,27 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
         .map(|v| v.contains_key("sidecar.istio.io/status"))
         .unwrap_or_default()
     {
-        return Ok(res);
+        return Ok(());
     }
 
     let Some(spec) = &obj.spec else {
-        return Ok(res);
+        return Ok(());
     };
 
     let Some(istio_container_idx) = spec.containers.iter().position(|x| x.name == "istio-proxy")
     else {
-        return Ok(res);
+        return Ok(());
     };
 
-    let container = &spec.containers[istio_container_idx];
+    let istio_container = &spec.containers[istio_container_idx];
 
-    let Some((_, tag)) = container.image.as_deref().and_then(|x| x.split_once(':')) else {
-        return Ok(res);
+    let Some((_, tag)) = istio_container
+        .image
+        .as_deref()
+        .and_then(|x| x.split_once(':'))
+    else {
+        return Ok(());
     };
-
-    let Some(ns) = obj.namespace() else {
-        return Ok(res);
-    };
-
-    let client = Client::try_default().await?;
-    let ns_api: Api<LeaksignalIstio> = Api::namespaced(client.clone(), &ns);
-    let cluster_api: Api<ClusterLeaksignalIstio> = Api::all(client.clone());
-
-    let ns_apis = ns_api.list(&ListParams::default()).await?.items;
-
-    let mut applicable_crd = ns_apis
-        .iter()
-        .find(|x| {
-            x.spec
-                .inner
-                .workload_selector
-                .labels
-                .iter()
-                .all(|(k, v)| obj.labels().get(k) == Some(v))
-        })
-        .or_else(|| {
-            ns_apis
-                .iter()
-                .find(|x| x.spec.inner.workload_selector.labels.is_empty())
-        })
-        .map(|x| x.spec.inner.clone());
-    if applicable_crd.is_none() {
-        let apis = cluster_api.list(&ListParams::default()).await?.items;
-        applicable_crd = apis
-            .iter()
-            .find(|x| {
-                x.spec
-                    .inner
-                    .workload_selector
-                    .labels
-                    .iter()
-                    .all(|(k, v)| obj.labels().get(k) == Some(v))
-            })
-            .or_else(|| {
-                apis.iter()
-                    .find(|x| x.spec.inner.workload_selector.labels.is_empty())
-            })
-            .map(|x| x.spec.inner.clone());
-    }
-    let Some(crd) = applicable_crd else {
-        // no leaksignal deployment
-        return Ok(res);
-    };
-
-    let mut patches = vec![];
 
     if !spec
         .volumes
@@ -360,13 +355,13 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
             Cow::Owned(format!("{}:{tag}", crd.native_repo))
         };
 
-        if container.resources.is_none() {
+        if istio_container.resources.is_none() {
             patches.extend([PatchOperation::Add(AddOperation {
                 path: format!("/spec/containers/{istio_container_idx}/resources"),
                 value: json!({"limits": {"memory": "1Gi"}}),
             })]);
         }
-        if container
+        if istio_container
             .resources
             .as_ref()
             .map(|x| x.limits.is_none())
@@ -377,7 +372,7 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
                 value: json!({"memory": "1Gi"}),
             })]);
         }
-        if container
+        if istio_container
             .resources
             .as_ref()
             .map(|x| {
@@ -401,10 +396,183 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
             }),
             PatchOperation::Replace(ReplaceOperation {
                 path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
-                value: serde_json::Value::String(crd.native_proxy_memory_limit),
+                value: serde_json::Value::String(crd.native_proxy_memory_limit.clone()),
             }),
         ]);
     }
+    Ok(())
+}
+
+async fn mutate_client_certs(
+    _client: &Client,
+    obj: &Pod,
+    crd: &CRDValues,
+    patches: &mut Vec<PatchOperation>,
+) -> Result<(), Error> {
+    if !obj
+        .metadata
+        .annotations
+        .as_ref()
+        .map(|v| v.contains_key("sidecar.istio.io/status"))
+        .unwrap_or_default()
+    {
+        return Ok(());
+    }
+
+    let Some(spec) = &obj.spec else {
+        return Ok(());
+    };
+
+    if !crd.enable_client_interception {
+        return Ok(());
+    }
+
+    for (container_idx, container) in spec.containers.iter().enumerate() {
+        let cert_volume = format!("{}-cert-dirs", container.name);
+
+        if spec
+            .volumes
+            .as_ref()
+            .map(|x| x.iter().any(|x| x.name == cert_volume))
+            .unwrap_or_default()
+        {
+            continue;
+        }
+
+        patches.extend([
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/volumes/0"),
+                value: json!({
+                    "name": &cert_volume,
+                    "emptyDir": {},
+                }),
+            }),
+
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/initContainers/0"),
+                value: json!({
+                    "image": container.image.as_ref(),
+                    "imagePullPolicy": container.image_pull_policy.as_ref(),
+                    "name": format!("{}-cert-init", container.name),
+                    "volumeMounts": [
+                        {
+                            "name": "leaksignal-proxy",
+                            "mountPath": "/ls-proxy/",
+                        },
+                        {
+                            "name": &cert_volume,
+                            "mountPath": "/certs/",
+                        },
+                    ],
+                    "command": [
+                        "/bin/sh",
+                        "-c",
+                        r#"
+                        if [ "$(id -u)" -ne 0 ]; then
+                            mkdir -p /certs/etc/ssl/certs && \
+                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
+                            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/
+                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ && \
+                            cp -frv /ls-proxy/ca.crt /certs/usr/local/share/ca-certificates/leaksignal.crt && \
+                            ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt
+                            ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/$(cat /ls-proxy/ca.crt.hash).0
+                            cat /ls-proxy/ca.crt >> /certs/etc/ssl/certs/ca-certificates.crt
+                        elif [ command -v update-ca-certificates ]; then
+                            mkdir -p /certs/etc/ssl/certs && \
+                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
+                            mkdir -p /usr/local/share/ca-certificates/ && \
+                            mkdir -p /etc/ssl/certs/ && \
+                            cp -fv /ls-proxy/ca.crt /usr/local/share/ca-certificates/leaksignal.crt && \
+                            update-ca-certificates && \
+                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ && \
+                            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/
+                        else
+                            mkdir -p /certs/etc/ssl/certs && \
+                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
+                            mkdir -p /usr/local/share/ca-certificates/ && \
+                            mkdir -p /etc/ssl/certs/ && \
+                            cat /ls-proxy/ca.crt >> /etc/ssl/certs/ca-certificates.crt
+                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/
+                        fi
+                        "#,
+                    ],
+                }),
+            }),
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                value: json!({
+                    "name": &cert_volume,
+                    "mountPath": "/etc/ssl/certs/",
+                    "subPath": "etc/ssl/certs/",
+                }),
+            }),
+            PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                value: json!({
+                    "name": &cert_volume,
+                    "mountPath": "/usr/local/share/ca-certificates/",
+                    "subPath": "usr/local/share/ca-certificates/",
+                }),
+            }),
+        ]);
+    }
+    Ok(())
+}
+
+async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, Error> {
+    let Some(ns) = obj.namespace() else {
+        return Ok(res);
+    };
+
+    let client = Client::try_default().await?;
+    let ns_api: Api<LeaksignalIstio> = Api::namespaced(client.clone(), &ns);
+    let cluster_api: Api<ClusterLeaksignalIstio> = Api::all(client.clone());
+
+    let ns_apis = ns_api.list(&ListParams::default()).await?.items;
+
+    let mut applicable_crd = ns_apis
+        .iter()
+        .find(|x| {
+            x.spec
+                .inner
+                .workload_selector
+                .labels
+                .iter()
+                .all(|(k, v)| obj.labels().get(k) == Some(v))
+        })
+        .or_else(|| {
+            ns_apis
+                .iter()
+                .find(|x| x.spec.inner.workload_selector.labels.is_empty())
+        })
+        .map(|x| x.spec.inner.clone());
+    if applicable_crd.is_none() {
+        let apis = cluster_api.list(&ListParams::default()).await?.items;
+        applicable_crd = apis
+            .iter()
+            .find(|x| {
+                x.spec
+                    .inner
+                    .workload_selector
+                    .labels
+                    .iter()
+                    .all(|(k, v)| obj.labels().get(k) == Some(v))
+            })
+            .or_else(|| {
+                apis.iter()
+                    .find(|x| x.spec.inner.workload_selector.labels.is_empty())
+            })
+            .map(|x| x.spec.inner.clone());
+    }
+    let Some(crd) = applicable_crd else {
+        // no leaksignal deployment
+        return Ok(res);
+    };
+
+    let mut patches = vec![];
+
+    mutate_istio(&client, obj, &crd, &mut patches).await?;
+    mutate_client_certs(&client, obj, &crd, &mut patches).await?;
 
     if !patches.is_empty() {
         res = res.with_patch(json_patch::Patch(patches))?;
