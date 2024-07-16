@@ -4,6 +4,8 @@ rbacEnabled: true
 rbacArgoRollout: true
 image:
   repository: leaksignal/leaksignal-operator
+nfsImage:
+  repository: leaksignal/nfs-ganesha
 resources:
   requests: 
     memory: 256Mi
@@ -11,4 +13,12 @@ resources:
   limits:
     memory: 1Gi
     cpu: 1.0
+nfsResources:
+  requests:
+    memory: 256Mi
+    cpu: 500m
+  limits:
+    memory: 1Gi
+    cpu: 1.0
+storageSize: 20Gi
 priority: 10000

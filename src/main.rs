@@ -538,7 +538,6 @@ async fn main() -> Result<(), kube::Error> {
             }
         }
     });
-    tokio::spawn(proxy_mgr::run_nfs_server());
     tokio::spawn(pod_scan::run_pod_scan(client.clone()));
 
     // Configure your controllers

@@ -468,32 +468,14 @@ async fn mutate_client_certs(
                         "/bin/sh",
                         "-c",
                         r#"
-                        if [ "$(id -u)" -ne 0 ]; then
-                            mkdir -p /certs/etc/ssl/certs && \
-                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
-                            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/
-                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ && \
-                            cp -frv /ls-proxy/ca.crt /certs/usr/local/share/ca-certificates/leaksignal.crt && \
-                            ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt
-                            ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/$(cat /ls-proxy/ca.crt.hash).0
-                            cat /ls-proxy/ca.crt >> /certs/etc/ssl/certs/ca-certificates.crt
-                        elif [ command -v update-ca-certificates ]; then
-                            mkdir -p /certs/etc/ssl/certs && \
-                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
-                            mkdir -p /usr/local/share/ca-certificates/ && \
-                            mkdir -p /etc/ssl/certs/ && \
-                            cp -fv /ls-proxy/ca.crt /usr/local/share/ca-certificates/leaksignal.crt && \
-                            update-ca-certificates && \
-                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ && \
-                            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/
-                        else
-                            mkdir -p /certs/etc/ssl/certs && \
-                            mkdir -p /certs/usr/local/share/ca-certificates/ && \
-                            mkdir -p /usr/local/share/ca-certificates/ && \
-                            mkdir -p /etc/ssl/certs/ && \
-                            cat /ls-proxy/ca.crt >> /etc/ssl/certs/ca-certificates.crt
-                            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/
-                        fi
+                        mkdir -p /certs/etc/ssl/certs && \
+                        mkdir -p /certs/usr/local/share/ca-certificates/ && \
+                        cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
+                        cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
+                        cp -frv /ls-proxy/ca.crt /certs/usr/local/share/ca-certificates/leaksignal.crt && \
+                        ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
+                        ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/$(cat /ls-proxy/ca.crt.hash).0 && \
+                        cat /ls-proxy/ca.crt >> /certs/etc/ssl/certs/ca-certificates.crt
                         "#,
                     ],
                 }),

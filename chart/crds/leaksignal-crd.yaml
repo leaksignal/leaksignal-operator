@@ -91,4 +91,7 @@ spec:
                       description: Labels to match any pod before deploying LeakSignal.
                       additionalProperties:
                         type: string
+                enableClientInterception:
+                  type: boolean
+                  description: If true (default), then certificates are installed in pods for outbound TLS interception.
               required: ["proxyVersion", "proxyHash", "apiKey"]
