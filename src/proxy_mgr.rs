@@ -40,7 +40,7 @@ lazy_static::lazy_static! {
     static ref BIND_ADDR: SocketAddr = {
         let base = std::env::var("PROXY_MGR_BIND").unwrap_or_default();
         if base.is_empty() {
-            "0.0.0.0:2049".parse().unwrap()
+            "0.0.0.0:2050".parse().unwrap()
         } else {
             base.parse().expect("failed to parse PROXY_MGR_BIND env var")
         }
@@ -187,9 +187,10 @@ pub async fn check_or_add_proxy(hash: &str, native: bool, url: &Url) -> Result<P
 }
 
 pub async fn run_nfs_server() {
-    let listener = NFSTcpListener::bind(&BIND_ADDR.to_string(), NFSServer {})
+    let mut listener = NFSTcpListener::bind(&BIND_ADDR.to_string(), NFSServer {})
         .await
         .expect("failed to bind NFS server");
+    listener.with_fake_port(2049);
     listener
         .handle_forever()
         .await

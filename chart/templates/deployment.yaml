@@ -54,15 +54,62 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      containers:
-      - name: {{ include "leaksignal.name" . }}
+      initContainers:
+      - name: ganesha-configure
         image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
-        imagePullPolicy: "Always"
+        imagePullPolicy: Always
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        env:
+        - name: INIT
+          value: "1"
+        volumeMounts:
+        - name: ganesha-conf
+          mountPath: /etc/ganesha
+      containers:
+      - name: ganesha
+        image: {{ .Values.nfsImage.repository }}:{{ .Values.nfsImage.tag | default "5.9" }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 2049
+          name: nfs
+        - containerPort: 111
+          name: nfs-rpc
+        {{- with .Values.nfsResources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+        - name: proxy-store
+          mountPath: /exports
+        - name: ganesha-conf
+          mountPath: /etc/ganesha
+      # - name: unfs3
+      #   image: {{ .Values.unfsImage.repository }}:{{ .Values.unfsImage.tag | default "5.9" }}
+      #   imagePullPolicy: Always
+      #   ports:
+      #   - containerPort: 2049
+      #     name: nfs
+      #   - containerPort: 111
+      #     name: nfs-rpc
+      #   {{- with .Values.nfsResources }}
+      #   resources:
+      #     {{- toYaml . | nindent 10 }}
+      #   {{- end }}
+      #   volumeMounts:
+      #   - name: proxy-store
+      #     mountPath: /exports
+      - name: operator
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+        imagePullPolicy: Always
         ports:
         - containerPort: 8443
           name: webhook-tls
-        - containerPort: 2049
-          name: nfs-proxy
+        env:
+        - name: RUST_LOG
+          value: TRACE
         {{- with .Values.resources }}
         resources:
           {{- toYaml . | nindent 10 }}
@@ -79,4 +126,6 @@ spec:
       {{ end }}
       volumes:
       - name: proxy-store
+        emptyDir: {}
+      - name: ganesha-conf
         emptyDir: {}

@@ -23,3 +23,25 @@ spec:
       port: 111
       targetPort: 2049
       name: proxy-rpcbind
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "leaksignal.name" . }}-internal-nfs
+  labels:
+    app: {{ include "leaksignal.name" . }}
+    {{- include "leaksignal.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "leaksignal.name" . }}
+    {{- include "leaksignal.selectorLabels" . | nindent 4 }}
+  ports:
+    - protocol: TCP
+      port: 2049
+      targetPort: 2050
+      name: proxy-nfs
+    - protocol: TCP
+      port: 111
+      targetPort: 2050
+      name: proxy-rpcbind

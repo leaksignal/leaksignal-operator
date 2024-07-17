@@ -6,10 +6,11 @@ mod native;
 mod pod_scan;
 mod proxy_mgr;
 mod webhook;
+mod ganesha;
 
 use envoy_json::OwnerInfo;
 use futures::stream::StreamExt;
-use k8s_openapi::api::core::v1::Namespace;
+use k8s_openapi::api::core::v1::{Namespace, Service};
 use kube::{
     api::{DeleteParams, ListParams, Patch, PatchParams, PostParams},
     client::Client,
@@ -495,12 +496,50 @@ where
     Ok(())
 }
 
+pub async fn get_service_ip(client: &Client, name: &str) -> Result<String, Error> {
+    let services: Api<Service> = Api::default_namespaced(client.clone());
+    let service = services
+        .get_opt(name)
+        .await?
+        .ok_or_else(|| {
+            Error::UserInputError(format!(
+                "missing leaksignal-operator service, cannot assign NFS"
+            ))
+        })?;
+    let cluster_ip = service
+        .spec
+        .as_ref()
+        .and_then(|x| x.cluster_ip.as_deref())
+        .ok_or_else(|| {
+            Error::UserInputError(format!(
+                "leaksignal-operator service has no clusterIP, cannot assign NFS"
+            ))
+        })?;
+    Ok(cluster_ip.to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), kube::Error> {
     env_logger::Builder::new()
         .parse_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("nfsserve", log::LevelFilter::Trace)
         .init();
     let client = Client::try_default().await?;
+
+    if std::env::var("INIT").unwrap_or_default() == "1" {
+        let service_ip = match get_service_ip(&client, "leaksignal-operator-internal-nfs").await {
+            Ok(x) => x,
+            Err(e) => {
+                error!("failed to get internal nfs service ip: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = ganesha::write_ganesha_config(&service_ip).await {
+            error!("failed to write ganesha config: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let certificate = match webhook::load_cert(client.clone()).await {
         Ok(x) => x,
