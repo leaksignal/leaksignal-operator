@@ -2,7 +2,7 @@
 apiVersion: operators.coreos.com/v1alpha1
 kind: ClusterServiceVersion
 metadata:
-  name: leaksignal-operator.v1.6.4
+  name: leaksignal-operator.v1.7.0
   annotations:
     capabilities: Full Lifecycle
     categories: Security
@@ -57,7 +57,7 @@ spec:
   links:
   - name: Documentation
     url: https://www.leaksignal.com/docs/Operator/Getting%20Started
-  version: 1.6.4
+  version: 1.7.0
   relatedImages:
   - name: operator
     image: docker.io/leaksignal/leaksignal-operator@sha256:762277b090810d1412e81ae4e9539896c98be28c88fc5f284361243eb8b84208
