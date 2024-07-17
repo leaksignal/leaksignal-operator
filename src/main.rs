@@ -142,7 +142,7 @@ pub struct CRDValues {
     pub proxy_pull_location: String,
     #[serde(default = "default_native_proxy_memory_limit")]
     pub native_proxy_memory_limit: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enable_client_interception: bool,
 }
 
