@@ -15,7 +15,7 @@ use x509_certificate::{
     X509Certificate,
 };
 
-use crate::{intercept::GeneratedCA, Error};
+use crate::Error;
 use sha2::Sha256;
 
 lazy_static::lazy_static! {
@@ -39,7 +39,7 @@ lazy_static::lazy_static! {
     static ref DOWNLOAD_MUTEX: Mutex<HashMap<String, Arc<Mutex<()>>>> = Default::default();
 }
 
-fn get_subject_hash(cert: &str) -> Result<String, Error> {
+pub fn get_subject_hash(cert: &str) -> Result<String, Error> {
     let cert = X509Certificate::from_pem(cert)
         .map_err(|e| Error::UserInputError(format!("failed to parse ca_cert: {e}")))?;
     let mut spki: Vec<SubjectPublicKeyInfo> = vec![];
@@ -89,24 +89,6 @@ fn get_subject_hash(cert: &str) -> Result<String, Error> {
     let raw = &hash_out[0..4];
     let swapped = [raw[3], raw[2], raw[1], raw[0]];
     Ok(hex::encode(&swapped))
-}
-
-pub async fn update_client_ca(ca: &GeneratedCA) -> Result<(), Error> {
-    let hash = get_subject_hash(&ca.ca_cert)?;
-
-    let temp_target = FILE_LOCATION.join("ca.crt.tmp");
-    let target = FILE_LOCATION.join("ca.crt");
-
-    tokio::fs::write(&temp_target, &ca.ca_cert).await?;
-    tokio::fs::rename(temp_target, target).await?;
-
-    let temp_target = FILE_LOCATION.join("ca.crt.hash.tmp");
-    let target = FILE_LOCATION.join("ca.crt.hash");
-
-    tokio::fs::write(&temp_target, &hash).await?;
-    tokio::fs::rename(temp_target, target).await?;
-
-    Ok(())
 }
 
 /// Downloads a proxy or blocks until download is complete based on hash. Also checks the hash.

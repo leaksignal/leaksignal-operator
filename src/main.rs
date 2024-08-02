@@ -510,19 +510,6 @@ async fn main() -> Result<(), kube::Error> {
         }
     };
 
-    let client_cert = match webhook::load_client_cert(client.clone()).await {
-        Ok(x) => x,
-        Err(e) => {
-            error!("failed to create/load client TLS ca cert: {e:?}");
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = proxy_mgr::update_client_ca(&client_cert).await {
-        error!("failed to set client TLS ca cert: {e:?}");
-        std::process::exit(1);
-    };
-
     if let Err(e) = webhook::prepare_webhook(client.clone(), &certificate).await {
         error!("failed to apply webhook config: {e:?}");
         std::process::exit(1);

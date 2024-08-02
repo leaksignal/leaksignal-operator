@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, convert::Infallible, net::SocketAddr};
+use std::{borrow::Cow, collections::BTreeMap, convert::Infallible, fmt::Write, net::SocketAddr};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use json_patch::{AddOperation, PatchOperation, ReplaceOperation};
@@ -23,10 +23,12 @@ use warp::{
     Filter,
 };
 
-use crate::{intercept::GeneratedCA, CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio};
+use crate::{
+    intercept::GeneratedCA, proxy_mgr::get_subject_hash, CRDValues, ClusterLeaksignalIstio, Error,
+    LeaksignalIstio,
+};
 
 const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
-const CLIENT_SECRET_NAME: &str = "leaksignal-operator-client-data";
 
 #[derive(Serialize, Deserialize)]
 pub struct SecretData {
@@ -52,40 +54,6 @@ impl TryFrom<Secret> for SecretData {
                 .ok_or_else(|| Error::UserInputError("missing tls.crt from secret".to_string()))?
                 .0,
         })
-    }
-}
-
-pub async fn load_client_cert(client: Client) -> Result<GeneratedCA, Error> {
-    let secret_api: Api<Secret> = Api::default_namespaced(client.clone());
-    if let Some(secret) = secret_api.get_opt(CLIENT_SECRET_NAME).await? {
-        return secret.try_into();
-    };
-
-    let ca = GeneratedCA::generate()?;
-    let out = secret_api
-        .create(
-            &PostParams::default(),
-            &Secret {
-                data: Some(ca.clone().into()),
-                immutable: Some(true),
-                metadata: ObjectMeta {
-                    name: Some(CLIENT_SECRET_NAME.to_string()),
-                    namespace: Some(client.default_namespace().to_string()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        )
-        .await;
-
-    match out {
-        Ok(out) => out.try_into(),
-        Err(e) => {
-            if let Some(secret) = secret_api.get_opt(CLIENT_SECRET_NAME).await? {
-                return secret.try_into();
-            };
-            Err(e.into())
-        }
     }
 }
 
@@ -427,6 +395,9 @@ async fn mutate_client_certs(
         return Ok(());
     }
 
+    let ca = GeneratedCA::generate()?;
+    let raw_ca = ca.ca_cert.replace('\n', "\\n");
+    let hash = get_subject_hash(&ca.ca_cert)?;
     for (container_idx, container) in spec.containers.iter().enumerate() {
         let cert_volume = format!("{}-cert-dirs", container.name);
 
@@ -439,6 +410,43 @@ async fn mutate_client_certs(
             continue;
         }
 
+        let mut init_command = format!(
+            r#"
+        mkdir -p /certs/etc/ssl/certs && \
+        mkdir -p /certs/usr/local/share/ca-certificates/ && \
+        cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
+        cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
+        echo -n '{raw_ca}' > /certs/usr/local/share/ca-certificates/leaksignal.crt && \
+        ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
+        ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/{hash}.0 && \
+        cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/certs/ca-certificates.crt"#
+        );
+
+        if container.name == "istio-proxy" {
+            let raw_cert = ca.cert.replace('\n', "\\n");
+            let raw_key = ca.key.replace('\n', "\\n");
+            writeln!(
+                &mut init_command,
+                r#" && \
+            mkdir -p /certs/ls-cert && \
+            echo -n '{raw_cert}' > /certs/ls-cert/global.crt && \
+            echo -n '{raw_key}' > /certs/ls-cert/global.key
+            "#
+            )
+            .unwrap();
+
+            patches.extend([PatchOperation::Add(AddOperation {
+                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                value: json!({
+                    "name": &cert_volume,
+                    "mountPath": "/ls-cert/",
+                    "subPath": "ls-cert/",
+                }),
+            })])
+        } else {
+            writeln!(&mut init_command, "").unwrap();
+        }
+
         patches.extend([
             PatchOperation::Add(AddOperation {
                 path: format!("/spec/volumes/0"),
@@ -447,7 +455,6 @@ async fn mutate_client_certs(
                     "emptyDir": {},
                 }),
             }),
-
             PatchOperation::Add(AddOperation {
                 path: format!("/spec/initContainers/0"),
                 value: json!({
@@ -456,10 +463,6 @@ async fn mutate_client_certs(
                     "name": format!("{}-cert-init", container.name),
                     "volumeMounts": [
                         {
-                            "name": "leaksignal-proxy",
-                            "mountPath": "/ls-proxy/",
-                        },
-                        {
                             "name": &cert_volume,
                             "mountPath": "/certs/",
                         },
@@ -467,16 +470,7 @@ async fn mutate_client_certs(
                     "command": [
                         "/bin/sh",
                         "-c",
-                        r#"
-                        mkdir -p /certs/etc/ssl/certs && \
-                        mkdir -p /certs/usr/local/share/ca-certificates/ && \
-                        cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
-                        cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
-                        cp -frv /ls-proxy/ca.crt /certs/usr/local/share/ca-certificates/leaksignal.crt && \
-                        ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
-                        ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/$(cat /ls-proxy/ca.crt.hash).0 && \
-                        cat /ls-proxy/ca.crt >> /certs/etc/ssl/certs/ca-certificates.crt
-                        "#,
+                        &init_command,
                     ],
                 }),
             }),
