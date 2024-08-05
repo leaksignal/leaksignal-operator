@@ -1,10 +1,13 @@
-use std::{borrow::Cow, collections::BTreeMap, convert::Infallible, fmt::Write, net::SocketAddr};
+use std::{
+    borrow::Cow, collections::BTreeMap, convert::Infallible, fmt::Write, net::SocketAddr,
+    path::PathBuf, time::Duration,
+};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use json_patch::{AddOperation, PatchOperation, ReplaceOperation};
 use k8s_openapi::api::{
     admissionregistration::v1::MutatingWebhookConfiguration,
-    core::v1::{Pod, Secret, Service},
+    core::v1::{Container, Pod, Secret},
 };
 use kube::{
     api::{ListParams, PatchParams, PostParams},
@@ -16,6 +19,7 @@ use kube::{
 };
 use log::{error, info, warn};
 use rcgen::{CertificateParams, KeyPair};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use warp::{
@@ -24,8 +28,9 @@ use warp::{
 };
 
 use crate::{
-    intercept::GeneratedCA, proxy_mgr::get_subject_hash, CRDValues, ClusterLeaksignalIstio, Error,
-    LeaksignalIstio,
+    intercept::GeneratedCA,
+    proxy_mgr::{get_subject_hash, FILE_LOCATION},
+    CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio,
 };
 
 const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";
@@ -170,9 +175,22 @@ fn webhook(namespace: &str, secret: &SecretData) -> Value {
 }
 
 pub async fn run_webhook(secret: &SecretData) -> Result<(), Error> {
-    let routes = warp::path("mutate")
-        .and(warp::body::json())
-        .and_then(mutate_handler)
+    let cert = secret.cert.clone();
+    let routes = warp::post()
+        .and(
+            warp::path("mutate")
+                .and(warp::body::json())
+                .and(warp::any().map(move || cert.clone()))
+                .and_then(mutate_handler),
+        )
+        .or(warp::get().and(
+            warp::path("proxy")
+                .and(warp::path::end())
+                .and(warp::header("ns"))
+                .and(warp::header("name"))
+                .and(warp::header::optional("hash"))
+                .and_then(proxy_request),
+        ))
         .with(warp::log::log("webhook"));
 
     let mut bind = std::env::var("ADMISSION_BIND").unwrap_or_default();
@@ -185,7 +203,7 @@ pub async fn run_webhook(secret: &SecretData) -> Result<(), Error> {
 
     info!("webhook listening on {bind}");
 
-    warp::serve(warp::post().and(routes))
+    warp::serve(routes)
         .tls()
         .cert(&secret.cert)
         .key(&secret.key)
@@ -195,7 +213,102 @@ pub async fn run_webhook(secret: &SecretData) -> Result<(), Error> {
     Ok(())
 }
 
-async fn mutate_handler(body: AdmissionReview<Pod>) -> Result<impl Reply, Infallible> {
+async fn lookup_crd(ns: &str, name: &str) -> Result<Option<CRDValues>, Error> {
+    let client = Client::try_default().await?;
+    let pod_api: Api<Pod> = Api::namespaced(client.clone(), &ns);
+    let Some(pod) = pod_api.get_opt(&name).await? else {
+        return Ok(None);
+    };
+    get_crd(&pod, &client).await
+}
+
+async fn get_proxy(crd: &CRDValues) -> Result<PathBuf, Error> {
+    let proxy_url = crd.proxy_url()?;
+    crate::proxy_mgr::check_or_add_proxy(&crd.proxy_hash, crd.native, &proxy_url).await
+}
+
+async fn proxy_request(
+    ns: String,
+    name: String,
+    hash: Option<String>,
+) -> Result<impl Reply, Infallible> {
+    let mut crd = match lookup_crd(&ns, &name).await {
+        Ok(Some(x)) => x,
+        Ok(None) => {
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(b"pod not found".to_vec()));
+        }
+        Err(e) => {
+            error!("failed to fetch pod {ns}/{name}: {e}");
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(b"pod fetch failed".to_vec()));
+        }
+    };
+    for _ in 0..60 {
+        if let Some(current) = &hash {
+            if current == &crd.proxy_hash {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                crd = match lookup_crd(&ns, &name).await {
+                    Ok(Some(x)) => x,
+                    Ok(None) => {
+                        return Ok(warp::http::Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(b"pod not found".to_vec()));
+                    }
+                    Err(e) => {
+                        error!("failed to fetch pod {ns}/{name}: {e}");
+                        return Ok(warp::http::Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(b"pod fetch failed".to_vec()));
+                    }
+                };
+                continue;
+            }
+        }
+        break;
+    }
+    if hash.as_deref() == Some(&crd.proxy_hash) {
+        return Ok(warp::http::Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .body(vec![]));
+    }
+    let path = match get_proxy(&crd).await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("failed to fetch proxy: {e}");
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(b"proxy fetch failed".to_vec()));
+        }
+    };
+
+    let file = FILE_LOCATION.join(path);
+    let file = match tokio::fs::read(&file).await {
+        Ok(x) => x,
+        Err(e) => {
+            log::warn!("failed to read proxy file '{}': {e}", file.display());
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(vec![]));
+        }
+    };
+    let mut filename = crd.proxy_hash.clone();
+    if crd.native {
+        filename.push_str(".so");
+    } else {
+        filename.push_str(".wasm");
+    }
+    Ok(warp::http::Response::builder()
+        .header("filename", filename)
+        .body(file))
+}
+
+async fn mutate_handler(
+    body: AdmissionReview<Pod>,
+    cert: Vec<u8>,
+) -> Result<impl Reply, Infallible> {
     let req: AdmissionRequest<_> = match body.try_into() {
         Ok(req) => req,
         Err(err) => {
@@ -207,7 +320,7 @@ async fn mutate_handler(body: AdmissionReview<Pod>) -> Result<impl Reply, Infall
     let mut res = AdmissionResponse::from(&req);
     if let Some(obj) = req.object {
         let name = obj.name_any();
-        res = match mutate(res.clone(), &obj).await {
+        res = match mutate(res.clone(), &obj, cert).await {
             Ok(res) => {
                 info!("accepted: {:?} on Pod {}", req.operation, name);
                 res
@@ -222,11 +335,79 @@ async fn mutate_handler(body: AdmissionReview<Pod>) -> Result<impl Reply, Infall
     Ok(reply::json(&res.into_review()))
 }
 
-async fn mutate_istio(
+async fn mutate_native(
+    istio_container: &Container,
+    istio_container_idx: usize,
+    crd: &CRDValues,
+    patches: &mut Vec<PatchOperation>,
+) -> Result<(), Error> {
+    let Some((_, tag)) = istio_container
+        .image
+        .as_deref()
+        .and_then(|x| x.split_once(':'))
+    else {
+        return Ok(());
+    };
+
+    let new_image = if crd.native_repo.contains(':') {
+        Cow::Borrowed(&*crd.native_repo)
+    } else {
+        Cow::Owned(format!("{}:{tag}", crd.native_repo))
+    };
+
+    if istio_container.resources.is_none() {
+        patches.extend([PatchOperation::Add(AddOperation {
+            path: format!("/spec/containers/{istio_container_idx}/resources"),
+            value: json!({"limits": {"memory": "1Gi"}}),
+        })]);
+    }
+    if istio_container
+        .resources
+        .as_ref()
+        .map(|x| x.limits.is_none())
+        .unwrap_or_default()
+    {
+        patches.extend([PatchOperation::Add(AddOperation {
+            path: format!("/spec/containers/{istio_container_idx}/resources/limits"),
+            value: json!({"memory": "1Gi"}),
+        })]);
+    }
+    if istio_container
+        .resources
+        .as_ref()
+        .map(|x| {
+            x.limits
+                .as_ref()
+                .map(|x| x.get("memory").is_none())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+    {
+        patches.extend([PatchOperation::Add(AddOperation {
+            path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
+            value: json!("1Gi"),
+        })]);
+    }
+
+    patches.extend([
+        PatchOperation::Replace(ReplaceOperation {
+            path: format!("/spec/containers/{istio_container_idx}/image"),
+            value: serde_json::Value::String(new_image.into_owned()),
+        }),
+        PatchOperation::Replace(ReplaceOperation {
+            path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
+            value: serde_json::Value::String(crd.native_proxy_memory_limit.clone()),
+        }),
+    ]);
+    Ok(())
+}
+
+async fn mutate_client_certs(
     client: &Client,
     obj: &Pod,
     crd: &CRDValues,
     patches: &mut Vec<PatchOperation>,
+    cert: Vec<u8>,
 ) -> Result<(), Error> {
     if !obj
         .metadata
@@ -237,71 +418,11 @@ async fn mutate_istio(
     {
         return Ok(());
     }
+    let pod_ns = obj.namespace().unwrap_or_default();
 
     let Some(spec) = &obj.spec else {
         return Ok(());
     };
-
-    let Some(istio_container_idx) = spec.containers.iter().position(|x| x.name == "istio-proxy")
-    else {
-        return Ok(());
-    };
-
-    let istio_container = &spec.containers[istio_container_idx];
-
-    let Some((_, tag)) = istio_container
-        .image
-        .as_deref()
-        .and_then(|x| x.split_once(':'))
-    else {
-        return Ok(());
-    };
-
-    if !spec
-        .volumes
-        .as_ref()
-        .map(|x| x.iter().any(|x| x.name == "leaksignal-proxy"))
-        .unwrap_or_default()
-    {
-        let services: Api<Service> = Api::default_namespaced(client.clone());
-        let service = services
-            .get_opt("leaksignal-operator")
-            .await?
-            .ok_or_else(|| {
-                Error::UserInputError(format!(
-                    "missing leaksignal-operator service, cannot assign NFS"
-                ))
-            })?;
-        let cluster_ip = service
-            .spec
-            .as_ref()
-            .and_then(|x| x.cluster_ip.as_deref())
-            .ok_or_else(|| {
-                Error::UserInputError(format!(
-                    "leaksignal-operator service has no clusterIP, cannot assign NFS"
-                ))
-            })?;
-        patches.extend([
-            PatchOperation::Add(AddOperation {
-                path: format!("/spec/volumes/0"),
-                value: json!({
-                    "name": "leaksignal-proxy",
-                    "nfs": {
-                        "server": cluster_ip,
-                        "path": "/",
-                        "readOnly": true,
-                    },
-                }),
-            }),
-            PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{istio_container_idx}/volumeMounts/0"),
-                value: json!({
-                    "name": "leaksignal-proxy",
-                    "mountPath": "/ls-proxy/",
-                }),
-            }),
-        ]);
-    }
 
     if obj
         .metadata
@@ -316,88 +437,17 @@ async fn mutate_istio(
         }));
     }
 
-    if crd.native {
-        let new_image = if crd.native_repo.contains(':') {
-            Cow::Borrowed(&*crd.native_repo)
-        } else {
-            Cow::Owned(format!("{}:{tag}", crd.native_repo))
-        };
-
-        if istio_container.resources.is_none() {
-            patches.extend([PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{istio_container_idx}/resources"),
-                value: json!({"limits": {"memory": "1Gi"}}),
-            })]);
-        }
-        if istio_container
-            .resources
-            .as_ref()
-            .map(|x| x.limits.is_none())
-            .unwrap_or_default()
-        {
-            patches.extend([PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{istio_container_idx}/resources/limits"),
-                value: json!({"memory": "1Gi"}),
-            })]);
-        }
-        if istio_container
-            .resources
-            .as_ref()
-            .map(|x| {
-                x.limits
-                    .as_ref()
-                    .map(|x| x.get("memory").is_none())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default()
-        {
-            patches.extend([PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
-                value: json!("1Gi"),
-            })]);
-        }
-
-        patches.extend([
-            PatchOperation::Replace(ReplaceOperation {
-                path: format!("/spec/containers/{istio_container_idx}/image"),
-                value: serde_json::Value::String(new_image.into_owned()),
-            }),
-            PatchOperation::Replace(ReplaceOperation {
-                path: format!("/spec/containers/{istio_container_idx}/resources/limits/memory"),
-                value: serde_json::Value::String(crd.native_proxy_memory_limit.clone()),
-            }),
-        ]);
-    }
-    Ok(())
-}
-
-async fn mutate_client_certs(
-    _client: &Client,
-    obj: &Pod,
-    crd: &CRDValues,
-    patches: &mut Vec<PatchOperation>,
-) -> Result<(), Error> {
-    if !obj
-        .metadata
-        .annotations
-        .as_ref()
-        .map(|v| v.contains_key("sidecar.istio.io/status"))
-        .unwrap_or_default()
-    {
-        return Ok(());
-    }
-
-    let Some(spec) = &obj.spec else {
-        return Ok(());
+    let ca = if crd.enable_client_interception {
+        GeneratedCA::generate()?
+    } else {
+        GeneratedCA::default()
     };
-
-    if !crd.enable_client_interception {
-        return Ok(());
-    }
-
-    let ca = GeneratedCA::generate()?;
     let raw_ca = ca.ca_cert.replace('\n', "\\n");
-    let hash = get_subject_hash(&ca.ca_cert)?;
+    let hash = if crd.enable_client_interception {
+        get_subject_hash(&ca.ca_cert)?
+    } else {
+        Default::default()
+    };
     for (container_idx, container) in spec.containers.iter().enumerate() {
         let cert_volume = format!("{}-cert-dirs", container.name);
 
@@ -410,43 +460,185 @@ async fn mutate_client_certs(
             continue;
         }
 
-        let mut init_command = format!(
-            r#"
-        mkdir -p /certs/etc/ssl/certs && \
-        mkdir -p /certs/usr/local/share/ca-certificates/ && \
-        cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
-        cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
-        echo -n '{raw_ca}' > /certs/usr/local/share/ca-certificates/leaksignal.crt && \
-        ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
-        ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/{hash}.0 && \
-        cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/certs/ca-certificates.crt"#
-        );
+        if !crd.enable_client_interception && container.name != "istio-proxy" {
+            continue;
+        }
+
+        let mut init_command = if crd.enable_client_interception {
+            format!(
+                r#"
+            mkdir -p /certs/etc/ssl/certs && \
+            mkdir -p /certs/usr/local/share/ca-certificates/ && \
+            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
+            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
+            echo -n '{raw_ca}' > /certs/usr/local/share/ca-certificates/leaksignal.crt && \
+            ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
+            ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/{hash}.0 && \
+            cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/certs/ca-certificates.crt"#
+            )
+            //TODO: different ca-bundle for rhel?
+        } else {
+            String::new()
+        };
 
         if container.name == "istio-proxy" {
             let raw_cert = ca.cert.replace('\n', "\\n");
             let raw_key = ca.key.replace('\n', "\\n");
+            let raw_operator = String::from_utf8_lossy(&cert).replace('\n', "\\n");
+            let ns = client.default_namespace();
+            let mut filename = crd.proxy_hash.clone();
+            if crd.native {
+                filename.push_str(".so");
+            } else {
+                filename.push_str(".wasm");
+            }
+            if crd.enable_client_interception {
+                write!(
+                    &mut init_command,
+                    r#" && \
+                    mkdir -p /certs/ls-cert && \
+                    mkdir -p /certs/ls-proxy && \
+                    echo -n '{raw_cert}' > /certs/ls-cert/global.crt && \
+                    echo -n '{raw_key}' > /certs/ls-cert/global.key && \
+                    echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
+                    filename=$(curl -v --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r'')
+                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename"#
+                )
+                .unwrap();
+            } else {
+                write!(
+                    &mut init_command,
+                    r#"mkdir -p /certs/ls-cert && \
+                    mkdir -p /certs/ls-proxy && \
+                    echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
+                    env && \
+                    filename=$(curl -v --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r')
+                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename"#
+                )
+                .unwrap();
+            }
+
+            let script = format!(
+                r#"
+            #!/bin/bash
+            while true; do
+                filename=$(basename $(ls /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
+                base=${{filename%.*}}
+                echo "checking for proxy updates from $base"
+                headers=$(curl --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
+                status=$(echo -n "$headers" | grep -i "HTTP/" | awk '{{print $2}}' | tr -d '\n')
+                if [ "$status" = "200" ]; then
+                    new_filename=$(echo -n "$headers" | grep -i "filename" | awk '{{print $2}}' | tr -d '\n')
+                    echo "Proxy fetch successful for $new_filename"
+                    mv -vf /ls-proxy/temp /ls-proxy/$new_filename
+                    if [ "$new_filename" != "$filename" ]; then
+                        rm -vf /ls-proxy/$filename
+                    fi
+                elif [ "$status" = "304" ]; then
+                    :
+                else
+                    if grep -qP '[^\x00-\x7F]' /ls-proxy/temp; then
+                        echo "Proxy fetch failed with error: $status, body: <binary>"
+                    else
+                        echo "Proxy fetch failed with error: $status, body: $(cat /ls-proxy/temp)"
+                    fi
+                fi
+                sleep 45
+            done
+            "#
+            );
+            let raw_script = script
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\'', r#"'"'"'"#);
             writeln!(
                 &mut init_command,
                 r#" && \
-            mkdir -p /certs/ls-cert && \
-            echo -n '{raw_cert}' > /certs/ls-cert/global.crt && \
-            echo -n '{raw_key}' > /certs/ls-cert/global.key
+            echo -n '{raw_script}' > /certs/ls-cert/update_proxy.sh && \
+            chmod +x /certs/ls-cert/update_proxy.sh
             "#
             )
             .unwrap();
 
-            patches.extend([PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
-                value: json!({
-                    "name": &cert_volume,
-                    "mountPath": "/ls-cert/",
-                    "subPath": "ls-cert/",
+            patches.extend([
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                    value: json!({
+                        "name": &cert_volume,
+                        "mountPath": "/ls-proxy/",
+                        "subPath": "ls-proxy/",
+                    }),
                 }),
-            })])
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                    value: json!({
+                        "name": &cert_volume,
+                        "mountPath": "/ls-cert/",
+                        "subPath": "ls-cert/",
+                    }),
+                }),
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/command"),
+                    value: json!([
+                        "/bin/bash",
+                        "-c",
+                        "/ls-cert/update_proxy.sh & \"$@\"",
+                        "_",
+                        "/usr/local/bin/pilot-agent",
+                    ]),
+                }),
+            ]);
+
+            if crd.native {
+                mutate_native(container, container_idx, crd, patches).await?;
+            }
         } else {
             writeln!(&mut init_command, "").unwrap();
         }
 
+        if crd.enable_client_interception {
+            patches.extend([
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                    value: json!({
+                        "name": &cert_volume,
+                        "mountPath": "/etc/ssl/certs/",
+                        "subPath": "etc/ssl/certs/",
+                    }),
+                }),
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
+                    value: json!({
+                        "name": &cert_volume,
+                        "mountPath": "/usr/local/share/ca-certificates/",
+                        "subPath": "usr/local/share/ca-certificates/",
+                    }),
+                }),
+            ]);
+        }
+        let mut new_container = json!({
+            "image": container.image.as_ref(),
+            "imagePullPolicy": container.image_pull_policy.as_ref(),
+            "name": format!("{}-cert-init", container.name),
+            "volumeMounts": [
+                {
+                    "name": &cert_volume,
+                    "mountPath": "/certs/",
+                },
+            ],
+            "command": [
+                "/bin/sh",
+                "-c",
+                &init_command,
+            ],
+        });
+        if container.name == "istio-proxy" {
+            new_container["securityContext"] = json!({
+                "runAsUser": 1337,
+                "runAsGroup": 1337,
+                "runAsNonRoot": true,
+            });
+        }
         patches.extend([
             PatchOperation::Add(AddOperation {
                 path: format!("/spec/volumes/0"),
@@ -457,50 +649,18 @@ async fn mutate_client_certs(
             }),
             PatchOperation::Add(AddOperation {
                 path: format!("/spec/initContainers/0"),
-                value: json!({
-                    "image": container.image.as_ref(),
-                    "imagePullPolicy": container.image_pull_policy.as_ref(),
-                    "name": format!("{}-cert-init", container.name),
-                    "volumeMounts": [
-                        {
-                            "name": &cert_volume,
-                            "mountPath": "/certs/",
-                        },
-                    ],
-                    "command": [
-                        "/bin/sh",
-                        "-c",
-                        &init_command,
-                    ],
-                }),
-            }),
-            PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
-                value: json!({
-                    "name": &cert_volume,
-                    "mountPath": "/etc/ssl/certs/",
-                    "subPath": "etc/ssl/certs/",
-                }),
-            }),
-            PatchOperation::Add(AddOperation {
-                path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
-                value: json!({
-                    "name": &cert_volume,
-                    "mountPath": "/usr/local/share/ca-certificates/",
-                    "subPath": "usr/local/share/ca-certificates/",
-                }),
+                value: new_container,
             }),
         ]);
     }
     Ok(())
 }
 
-async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionResponse, Error> {
+async fn get_crd(obj: &Pod, client: &Client) -> Result<Option<CRDValues>, Error> {
     let Some(ns) = obj.namespace() else {
-        return Ok(res);
+        return Ok(None);
     };
 
-    let client = Client::try_default().await?;
     let ns_api: Api<LeaksignalIstio> = Api::namespaced(client.clone(), &ns);
     let cluster_api: Api<ClusterLeaksignalIstio> = Api::all(client.clone());
 
@@ -540,15 +700,23 @@ async fn mutate(mut res: AdmissionResponse, obj: &Pod) -> Result<AdmissionRespon
             })
             .map(|x| x.spec.inner.clone());
     }
-    let Some(crd) = applicable_crd else {
-        // no leaksignal deployment
+    Ok(applicable_crd)
+}
+
+async fn mutate(
+    mut res: AdmissionResponse,
+    obj: &Pod,
+    cert: Vec<u8>,
+) -> Result<AdmissionResponse, Error> {
+    let client = Client::try_default().await?;
+
+    let Some(crd) = get_crd(obj, &client).await? else {
         return Ok(res);
     };
 
     let mut patches = vec![];
 
-    mutate_istio(&client, obj, &crd, &mut patches).await?;
-    mutate_client_certs(&client, obj, &crd, &mut patches).await?;
+    mutate_client_certs(&client, obj, &crd, &mut patches, cert).await?;
 
     if !patches.is_empty() {
         res = res.with_patch(json_patch::Patch(patches))?;

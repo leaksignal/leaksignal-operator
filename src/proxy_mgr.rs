@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use bcder::{
     encode::{self, Values},
@@ -19,20 +19,12 @@ use crate::Error;
 use sha2::Sha256;
 
 lazy_static::lazy_static! {
-    static ref FILE_LOCATION: PathBuf = {
+    pub static ref FILE_LOCATION: PathBuf = {
         let base = std::env::var("PROXY_MGR_PATH").unwrap_or_default();
         if base.is_empty() {
             "/proxy".into()
         } else {
             base.into()
-        }
-    };
-    static ref BIND_ADDR: SocketAddr = {
-        let base = std::env::var("PROXY_MGR_BIND").unwrap_or_default();
-        if base.is_empty() {
-            "0.0.0.0:2049".parse().unwrap()
-        } else {
-            base.parse().expect("failed to parse PROXY_MGR_BIND env var")
         }
     };
     static ref CLIENT: Client = Client::new();
@@ -102,12 +94,15 @@ pub async fn check_or_add_proxy(hash: &str, native: bool, url: &Url) -> Result<P
     } else {
         target.set_extension("wasm");
     }
+    let mut temp_target = target.clone();
+    temp_target.set_extension("tmp");
     if tokio::fs::try_exists(&target).await? {
         return Ok(target
             .strip_prefix(&*FILE_LOCATION)
             .expect("malformed path")
             .to_path_buf());
     }
+    tokio::fs::create_dir_all(&*FILE_LOCATION).await?;
 
     let mutex = {
         let mut map = DOWNLOAD_MUTEX.lock().await;
@@ -144,7 +139,8 @@ pub async fn check_or_add_proxy(hash: &str, native: bool, url: &Url) -> Result<P
         )));
     }
 
-    tokio::fs::write(&target, &body).await?;
+    tokio::fs::write(&temp_target, &body).await?;
+    tokio::fs::rename(&temp_target, &target).await?;
 
     {
         DOWNLOAD_MUTEX.lock().await.remove(hash);

@@ -75,37 +75,11 @@
           }
         }
       },
-      "nfsImage": {
-        "description": "Docker image configuration",
-        "type": "object",
-        "properties": {
-          "repository": {
-            "description": "Docker image repository, defaults to leaksignal/nfs-ganesha",
-            "type": "string"
-          },
-          "tag": {
-            "description": "Docker image tag, defaults to 5.9",
-            "type": "string"
-          }
-        }
-      },
       "rbacEnabled": { "type": "boolean" },
       "rbacArgoRollout": { "type": "boolean" },
       "resources": {
         "description": "Resource requests and limits",
         "type": "object"
-      },
-      "nfsResources": {
-        "description": "NFS Resource requests and limits",
-        "type": "object"
-      },
-      "storageSize": {
-        "type": "string",
-        "description": "K8s size for PV cache"
-      },
-      "storageClass": {
-        "type": "string",
-        "description": "optionally specified storage class"
       },
       "priority": {
         "type": "integer",

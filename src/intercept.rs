@@ -5,7 +5,7 @@ use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
 
 use crate::Error;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GeneratedCA {
     pub ca_cert: String,
     pub ca_key: String,
@@ -70,6 +70,7 @@ impl Into<BTreeMap<String, ByteString>> for GeneratedCA {
         out
     }
 }
+
 impl GeneratedCA {
     pub fn generate() -> Result<GeneratedCA, Error> {
         let mut params = CertificateParams::default();

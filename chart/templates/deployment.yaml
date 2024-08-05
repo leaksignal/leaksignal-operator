@@ -55,43 +55,6 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-      - name: ganesha
-        image: {{ .Values.nfsImage.repository }}:{{ .Values.nfsImage.tag | default "5.9" }}
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 2049
-          name: nfs
-        - containerPort: 111
-          name: nfs-rpc
-        securityContext:
-          # privileged: true
-          capabilities:
-            add:
-            - DAC_READ_SEARCH
-            - DAC_OVERRIDE
-            - SYS_ADMIN
-            - SYS_RESOURCE
-            - IPC_LOCK
-        env:
-        - name: ACCESS_TYPE
-          value: RO
-        - name: SQUASH_MODE
-          value: allsquash
-        - name: EXPORT_PATH
-          value: /exports
-        - name: PSEUDO_PATH
-          value: /
-        - name: EXPORT_ID
-          value: "0"
-        {{- with .Values.nfsResources }}
-        resources:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-        volumeMounts:
-        - name: {{ include "leaksignal.name" . }}-proxy-cache
-          mountPath: /exports
-        - name: ganesha-conf
-          mountPath: /etc/ganesha
       - name: operator
         image: {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
         imagePullPolicy: Always
@@ -102,9 +65,6 @@ spec:
         resources:
           {{- toYaml . | nindent 10 }}
         {{- end }}
-        volumeMounts:
-        - name: {{ include "leaksignal.name" . }}-proxy-cache
-          mountPath: /proxy
 {{ if and .Values.imageCredentials .Values.imageCredentials.username .Values.imageCredentials.password }}
       imagePullSecrets:
       - name: {{ include "leaksignal.name" . }}-image-secret
@@ -112,21 +72,3 @@ spec:
       {{ if .Values.rbacEnabled }}
       serviceAccountName: {{ include "leaksignal.name" . }}
       {{ end }}
-      volumes:
-      - name: ganesha-conf
-        configMap:
-          name: {{ include "leaksignal.name" . }}-ganesha
-  volumeClaimTemplates:
-  - metadata:
-      name: {{ include "leaksignal.name" . }}-proxy-cache
-      labels:
-        app: {{ include "leaksignal.name" . }}
-    spec:
-      accessModes:
-        - ReadWriteOnce
-      {{ with .Values.storageClass }}
-      storageClassName: {{ . }}
-      {{ end }}
-      resources:
-        requests:
-          storage: {{ .Values.storageSize }}

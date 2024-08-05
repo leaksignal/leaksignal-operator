@@ -175,6 +175,32 @@ impl CRDValues {
         }
         out
     }
+
+    pub fn proxy_url(&self) -> Result<Url, Error> {
+        let mut proxy_url: Url = self.proxy_pull_location.parse().map_err(|e| {
+            Error::UserInputError(format!("failed to parse proxyPullLocation: {e:?}"))
+        })?;
+        if proxy_url.cannot_be_a_base()
+            || (proxy_url.scheme() != "https" && proxy_url.scheme() != "http")
+        {
+            return Err(Error::UserInputError(
+                "proxyPullLocation must be a http(s) URL".to_string(),
+            ));
+        }
+        proxy_url
+            .path_segments_mut()
+            .unwrap()
+            .push(&self.proxy_version);
+        if self.native {
+            proxy_url.path_segments_mut().unwrap().push("leaksignal.so");
+        } else {
+            proxy_url
+                .path_segments_mut()
+                .unwrap()
+                .push("leaksignal.wasm");
+        }
+        Ok(proxy_url)
+    }
 }
 
 #[derive(CustomResource, Serialize, Deserialize, Debug, Clone, JsonSchema)]
@@ -441,28 +467,7 @@ where
     if !is_deleted {
         info!("patching {}", values.istio_name);
 
-        let mut proxy_url: Url = values.proxy_pull_location.parse().map_err(|e| {
-            Error::UserInputError(format!("failed to parse proxyPullLocation: {e:?}"))
-        })?;
-        if proxy_url.cannot_be_a_base()
-            || (proxy_url.scheme() != "https" && proxy_url.scheme() != "http")
-        {
-            return Err(Error::UserInputError(
-                "proxyPullLocation must be a http(s) URL".to_string(),
-            ));
-        }
-        proxy_url
-            .path_segments_mut()
-            .unwrap()
-            .push(&values.proxy_version);
-        if values.native {
-            proxy_url.path_segments_mut().unwrap().push("leaksignal.so");
-        } else {
-            proxy_url
-                .path_segments_mut()
-                .unwrap()
-                .push("leaksignal.wasm");
-        }
+        let proxy_url = values.proxy_url()?;
         let path =
             proxy_mgr::check_or_add_proxy(&values.proxy_hash, values.native, &proxy_url).await?;
 

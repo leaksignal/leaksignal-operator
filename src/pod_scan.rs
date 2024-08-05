@@ -11,7 +11,7 @@ use log::{error, info};
 use crate::{CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio};
 
 pub async fn run_pod_scan(client: Client) {
-    let mut duration_secs = 5;
+    let mut duration_secs = 30;
     loop {
         tokio::time::sleep(Duration::from_secs(duration_secs)).await;
         if duration_secs < 300 {
@@ -91,23 +91,6 @@ async fn check_pod(
                 .await?;
             return Ok(());
         }
-    }
-    let volume_present = pod
-        .spec
-        .as_ref()
-        .and_then(|x| x.volumes.as_ref())
-        .and_then(|x| x.iter().find(|x| x.name == "leaksignal-proxy"))
-        .is_some();
-    if !volume_present {
-        info!(
-            "restarting pod {}/{} due to volume out-of-sync",
-            pod.namespace().as_deref().unwrap_or_default(),
-            pod.name_any()
-        );
-        pod_api
-            .delete(&pod.name_any(), &DeleteParams::default())
-            .await?;
-        return Ok(());
     }
     Ok(())
 }
