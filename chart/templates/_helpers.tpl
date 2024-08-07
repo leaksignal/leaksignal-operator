@@ -1,9 +1,3 @@
-{{/*
-Expand the name of the chart.
-*/}}
-{{- define "leaksignal.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
-{{- end }}
 
 {{/*
 Create chart name and version as used by the chart label.
@@ -28,7 +22,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 Selector labels
 */}}
 {{- define "leaksignal.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "leaksignal.name" . }}
+app.kubernetes.io/name: leaksignal-operator
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 

@@ -1,5 +1,3 @@
-nameOverride: ""
-
 rbacEnabled: true
 rbacArgoRollout: true
 image:

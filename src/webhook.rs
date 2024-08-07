@@ -10,7 +10,7 @@ use k8s_openapi::api::{
     core::v1::{Container, Pod, Secret},
 };
 use kube::{
-    api::{ListParams, PatchParams, PostParams},
+    api::{ListParams, Patch, PatchParams, PostParams},
     core::{
         admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
         ObjectMeta,
@@ -191,6 +191,15 @@ pub async fn run_webhook(secret: &SecretData) -> Result<(), Error> {
                 .and(warp::header::optional("hash"))
                 .and_then(proxy_request),
         ))
+        .or(warp::get().and(
+            warp::path("proxy-confirm")
+                .and(warp::path::end())
+                .and(warp::header("ns"))
+                .and(warp::header("name"))
+                .and(warp::header("uid"))
+                .and(warp::header("hash"))
+                .and_then(proxy_confirm),
+        ))
         .with(warp::log::log("webhook"));
 
     let mut bind = std::env::var("ADMISSION_BIND").unwrap_or_default();
@@ -213,13 +222,16 @@ pub async fn run_webhook(secret: &SecretData) -> Result<(), Error> {
     Ok(())
 }
 
-async fn lookup_crd(ns: &str, name: &str) -> Result<Option<CRDValues>, Error> {
-    let client = Client::try_default().await?;
+async fn lookup_crd(
+    client: &Client,
+    ns: &str,
+    name: &str,
+) -> Result<Option<(CRDValues, Pod)>, Error> {
     let pod_api: Api<Pod> = Api::namespaced(client.clone(), &ns);
     let Some(pod) = pod_api.get_opt(&name).await? else {
         return Ok(None);
     };
-    get_crd(&pod, &client).await
+    get_crd(&pod, &client).await.map(|x| x.map(|x| (x, pod)))
 }
 
 async fn get_proxy(crd: &CRDValues) -> Result<PathBuf, Error> {
@@ -227,12 +239,84 @@ async fn get_proxy(crd: &CRDValues) -> Result<PathBuf, Error> {
     crate::proxy_mgr::check_or_add_proxy(&crd.proxy_hash, crd.native, &proxy_url).await
 }
 
+async fn proxy_confirm(
+    ns: String,
+    name: String,
+    uid: String,
+    hash: String,
+) -> Result<impl Reply, Infallible> {
+    let client = match Client::try_default().await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("failed to init client{e}");
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(b"k8s conn failed".to_vec()));
+        }
+    };
+    let (crd, pod) = match lookup_crd(&client, &ns, &name).await {
+        Ok(Some(x)) => x,
+        Ok(None) => {
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(b"pod not found".to_vec()));
+        }
+        Err(e) => {
+            error!("failed to fetch pod {ns}/{name}: {e}");
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(b"pod fetch failed".to_vec()));
+        }
+    };
+
+    if pod.uid() != Some(uid) {
+        return Ok(warp::http::Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(b"UID mismatch".to_vec()));
+    }
+
+    if crd.proxy_hash != hash {
+        return Ok(warp::http::Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(b"Hash mismatch".to_vec()));
+    }
+
+    let api: Api<Pod> = Api::namespaced(client.clone(), &ns);
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                "ls-proxy": &hash[..hash.len().min(63)],
+            },
+        }
+    });
+    let patch = Patch::Merge(&patch);
+    if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+        error!("failed to patch pod {ns}/{name}: {e}");
+        return Ok(warp::http::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(b"Pod patch failed".to_vec()));
+    }
+
+    Ok(warp::http::Response::builder()
+        .status(StatusCode::OK)
+        .body(vec![]))
+}
+
 async fn proxy_request(
     ns: String,
     name: String,
     hash: Option<String>,
 ) -> Result<impl Reply, Infallible> {
-    let mut crd = match lookup_crd(&ns, &name).await {
+    let client = match Client::try_default().await {
+        Ok(x) => x,
+        Err(e) => {
+            error!("failed to init client{e}");
+            return Ok(warp::http::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(b"k8s conn failed".to_vec()));
+        }
+    };
+    let (mut crd, _) = match lookup_crd(&client, &ns, &name).await {
         Ok(Some(x)) => x,
         Ok(None) => {
             return Ok(warp::http::Response::builder()
@@ -250,7 +334,7 @@ async fn proxy_request(
         if let Some(current) = &hash {
             if current == &crd.proxy_hash {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                crd = match lookup_crd(&ns, &name).await {
+                (crd, _) = match lookup_crd(&client, &ns, &name).await {
                     Ok(Some(x)) => x,
                     Ok(None) => {
                         return Ok(warp::http::Response::builder()
@@ -501,8 +585,10 @@ async fn mutate_client_certs(
                     echo -n '{raw_cert}' > /certs/ls-cert/global.crt && \
                     echo -n '{raw_key}' > /certs/ls-cert/global.key && \
                     echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
-                    filename=$(curl -v --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r'')
-                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename"#
+                    export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r'') && \
+                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
+                    base=${{filename%.*}}
+                    curl --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
                 )
                 .unwrap();
             } else {
@@ -511,9 +597,10 @@ async fn mutate_client_certs(
                     r#"mkdir -p /certs/ls-cert && \
                     mkdir -p /certs/ls-proxy && \
                     echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
-                    env && \
-                    filename=$(curl -v --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r')
-                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename"#
+                    export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r') && \
+                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
+                    base=${{filename%.*}}
+                    curl --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
                 )
                 .unwrap();
             }
@@ -522,7 +609,7 @@ async fn mutate_client_certs(
                 r#"
             #!/bin/bash
             while true; do
-                filename=$(basename $(ls /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
+                filename=$(basename $(ls -t /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
                 base=${{filename%.*}}
                 echo "checking for proxy updates from $base"
                 headers=$(curl --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
@@ -531,9 +618,8 @@ async fn mutate_client_certs(
                     new_filename=$(echo -n "$headers" | grep -i "filename" | awk '{{print $2}}' | tr -d '\n')
                     echo "Proxy fetch successful for $new_filename"
                     mv -vf /ls-proxy/temp /ls-proxy/$new_filename
-                    if [ "$new_filename" != "$filename" ]; then
-                        rm -vf /ls-proxy/$filename
-                    fi
+                    new_base=${{new_filename%.*}}
+                    curl --cacert /ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $new_base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm
                 elif [ "$status" = "304" ]; then
                     :
                 else
@@ -561,6 +647,17 @@ async fn mutate_client_certs(
             .unwrap();
 
             patches.extend([
+                PatchOperation::Add(AddOperation {
+                    path: format!("/spec/containers/{container_idx}/env/0"),
+                    value: json!({
+                        "name": "POD_UID",
+                        "valueFrom": {
+                            "fieldRef": {
+                                "fieldPath": "metadata.uid"
+                            }
+                        }
+                    }),
+                }),
                 PatchOperation::Add(AddOperation {
                     path: format!("/spec/containers/{container_idx}/volumeMounts/0"),
                     value: json!({
@@ -630,6 +727,16 @@ async fn mutate_client_certs(
                 "/bin/sh",
                 "-c",
                 &init_command,
+            ],
+            "env": [
+                {
+                    "name": "POD_UID",
+                    "valueFrom": {
+                        "fieldRef": {
+                            "fieldPath": "metadata.uid"
+                        }
+                    }
+                }
             ],
         });
         if container.name == "istio-proxy" {

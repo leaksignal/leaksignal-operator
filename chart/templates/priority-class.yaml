@@ -1,9 +1,9 @@
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: {{ include "leaksignal.name" . }}
+  name: leaksignal-operator
   labels:
-    app: {{ include "leaksignal.name" . }}
+    app: leaksignal-operator
     {{- include "leaksignal.labels" . | nindent 4 }}
 preemptionPolicy: PreemptLowerPriority
 value: {{ .Values.priority }}

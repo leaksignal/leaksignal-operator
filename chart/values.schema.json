@@ -84,6 +84,57 @@
       "priority": {
         "type": "integer",
         "description": "Priority values for operator pod"
+      },
+      "redis": {
+        "type": "object",
+        "properties": {
+          "memoryRequest": { "type": ["string", "null"] },
+          "memoryLimit": { "type": ["string", "null"] },
+          "cpuRequest": { "type": ["number", "null"] },
+          "cpuLimit": { "type": ["number", "null"] },
+          "schedulerName": {
+            "description": "Name of the scheduler",
+            "type": ["string", "null"]
+          },
+          "securityContext": {
+            "description": "Security context for the pod",
+            "type": ["object", "null"]
+          },
+          "hostAliases": {
+            "description": "Host aliases for the pod",
+            "type": ["array", "null"],
+            "items": {
+              "type": "object"
+            }
+          },
+          "priorityClassName": {
+            "description": "Priority class name for the pod",
+            "type": ["string", "null"]
+          },
+          "nodeSelector": {
+            "description": "Node selector for the pod",
+            "type": ["object", "null"]
+          },
+          "affinity": {
+            "description": "Affinity rules for the pod",
+            "type": ["object", "null"]
+          },
+          "topologySpreadConstraints": {
+            "description": "Topology spread constraints for the pod",
+            "type": ["array", "null"],
+            "items": {
+              "type": "object"
+            }
+          },
+          "tolerations": {
+            "description": "Tolerations for the pod",
+            "type": ["array", "null"],
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": []
       }
     }
   }

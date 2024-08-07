@@ -243,6 +243,10 @@ pub fn create_json(
     workload_selector
         .labels
         .insert("ls-deployed".to_string(), "1".to_string());
+    workload_selector.labels.insert(
+        "ls-proxy".to_string(),
+        values.proxy_hash[..values.proxy_hash.len().min(63)].to_string(),
+    );
 
     Ok(json!({
       "apiVersion": "networking.istio.io/v1alpha3",

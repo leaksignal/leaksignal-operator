@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "leaksignal.name" . }}
+  name: leaksignal-operator
   labels:
-    app: {{ include "leaksignal.name" . }}
+    app: leaksignal-operator
     {{- include "leaksignal.labels" . | nindent 4 }}
 spec:
-  serviceName: {{ include "leaksignal.name" . }}
+  serviceName: leaksignal-operator
   replicas: 1
   selector:
     matchLabels:
-      app: {{ include "leaksignal.name" . }}
+      app: leaksignal-operator
       {{- include "leaksignal.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: {{ include "leaksignal.name" . }}
+        app: leaksignal-operator
         ls-native: excluded
         {{- include "leaksignal.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
@@ -67,8 +67,8 @@ spec:
         {{- end }}
 {{ if and .Values.imageCredentials .Values.imageCredentials.username .Values.imageCredentials.password }}
       imagePullSecrets:
-      - name: {{ include "leaksignal.name" . }}-image-secret
+      - name: leaksignal-operator-image-secret
 {{ end }}
       {{ if .Values.rbacEnabled }}
-      serviceAccountName: {{ include "leaksignal.name" . }}
+      serviceAccountName: leaksignal-operator
       {{ end }}
