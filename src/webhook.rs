@@ -526,7 +526,7 @@ async fn mutate_client_certs(
     } else {
         GeneratedCA::default()
     };
-    let raw_ca = ca.ca_cert.replace('\n', "\\n");
+    let raw_ca = &ca.ca_cert;
     let hash = if crd.enable_client_interception {
         get_subject_hash(&ca.ca_cert)?
     } else {
@@ -550,15 +550,17 @@ async fn mutate_client_certs(
 
         let mut init_command = if crd.enable_client_interception {
             format!(
-                r#"
-            mkdir -p /certs/etc/ssl/certs && \
-            mkdir -p /certs/usr/local/share/ca-certificates/ && \
-            cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
-            cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
-            echo -n '{raw_ca}' > /certs/usr/local/share/ca-certificates/leaksignal.crt && \
-            ln -sv /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
-            ln -sv ca-cert-leaksignal.crt /certs/etc/ssl/certs/{hash}.0 && \
-            cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/certs/ca-certificates.crt"#
+                r#"mkdir -pv /certs/etc/ssl/certs && \
+mkdir -pv /certs/usr/local/share/ca-certificates/ && \
+cp -frv /usr/local/share/ca-certificates/* /certs/usr/local/share/ca-certificates/ || true && \
+cp -frv /etc/ssl/certs/* /certs/etc/ssl/certs/ || true && \
+(cat << EOF > /certs/usr/local/share/ca-certificates/leaksignal.crt
+{raw_ca}
+EOF
+) && \
+ln -svf /usr/local/share/ca-certificates/leaksignal.crt /certs/etc/ssl/certs/ca-cert-leaksignal.crt && \
+ln -svf ca-cert-leaksignal.crt /certs/etc/ssl/certs/{hash}.0 && \
+cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/certs/ca-certificates.crt"#
             )
             //TODO: different ca-bundle for rhel?
         } else {
@@ -566,9 +568,9 @@ async fn mutate_client_certs(
         };
 
         if container.name == "istio-proxy" {
-            let raw_cert = ca.cert.replace('\n', "\\n");
-            let raw_key = ca.key.replace('\n', "\\n");
-            let raw_operator = String::from_utf8_lossy(&cert).replace('\n', "\\n");
+            let raw_cert = &ca.cert;
+            let raw_key = &ca.key;
+            let raw_operator = String::from_utf8_lossy(&cert);
             let ns = client.default_namespace();
             let mut filename = crd.proxy_hash.clone();
             if crd.native {
@@ -580,69 +582,82 @@ async fn mutate_client_certs(
                 write!(
                     &mut init_command,
                     r#" && \
-                    mkdir -p /certs/ls-cert && \
-                    mkdir -p /certs/ls-proxy && \
-                    echo -n '{raw_cert}' > /certs/ls-cert/global.crt && \
-                    echo -n '{raw_key}' > /certs/ls-cert/global.key && \
-                    echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
-                    export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r'') && \
-                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
-                    base=${{filename%.*}}
-                    curl --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
+mkdir -pv /certs/ls-cert && \
+mkdir -pv /certs/ls-proxy && \
+(cat << EOF > /certs/ls-cert/global.crt
+{raw_cert}
+EOF
+) && \
+(cat << EOF > /certs/ls-cert/global.key
+{raw_key}
+EOF
+) && \
+(cat << EOF > /certs/ls-cert/operator.crt
+{raw_operator}
+EOF
+) && \
+export filename=$(curl -v --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r') && \
+mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
+base=${{filename%.*}}
+curl -v --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
                 )
                 .unwrap();
             } else {
                 write!(
                     &mut init_command,
-                    r#"mkdir -p /certs/ls-cert && \
-                    mkdir -p /certs/ls-proxy && \
-                    echo -n '{raw_operator}' > /certs/ls-cert/operator.crt && \
-                    export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r') && \
-                    mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
-                    base=${{filename%.*}}
-                    curl --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
+                    r#"mkdir -pv /certs/ls-cert && \
+mkdir -pv /certs/ls-proxy && \
+cat << EOF > /certs/ls-cert/operator.crt
+{raw_operator}
+EOF && \
+export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r') && \
+mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
+base=${{filename%.*}}
+curl --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm"#
                 )
                 .unwrap();
             }
 
             let script = format!(
-                r#"
-            #!/bin/bash
-            while true; do
-                filename=$(basename $(ls -t /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
-                base=${{filename%.*}}
-                echo "checking for proxy updates from $base"
-                headers=$(curl --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
-                status=$(echo -n "$headers" | grep -i "HTTP/" | awk '{{print $2}}' | tr -d '\n')
-                if [ "$status" = "200" ]; then
-                    new_filename=$(echo -n "$headers" | grep -i "filename" | awk '{{print $2}}' | tr -d '\n')
-                    echo "Proxy fetch successful for $new_filename"
-                    mv -vf /ls-proxy/temp /ls-proxy/$new_filename
-                    new_base=${{new_filename%.*}}
-                    curl --cacert /ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $new_base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm
-                elif [ "$status" = "304" ]; then
-                    :
-                else
-                    if grep -qP '[^\x00-\x7F]' /ls-proxy/temp; then
-                        echo "Proxy fetch failed with error: $status, body: <binary>"
-                    else
-                        echo "Proxy fetch failed with error: $status, body: $(cat /ls-proxy/temp)"
-                    fi
-                fi
-                sleep 45
-            done
-            "#
+                r#"#!/bin/bash
+while true; do
+    filename=$(basename $(ls -t /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
+    base=${{filename%.*}}
+    echo "checking for proxy updates from $base"
+    headers=$(curl --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
+    status=$(echo -n "$headers" | grep -i "HTTP/" | awk '{{print $2}}' | tr -d '\n')
+    if [ "$status" = "200" ]; then
+        new_filename=$(echo -n "$headers" | grep -i "filename" | awk '{{print $2}}' | tr -d '\n')
+        echo "Proxy fetch successful for $new_filename"
+        mv -vf /ls-proxy/temp /ls-proxy/$new_filename
+        new_base=${{new_filename%.*}}
+        curl --cacert /ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $new_base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm
+    elif [ "$status" = "304" ]; then
+        :
+    else
+        if grep -qP '[^\x00-\x7F]' /ls-proxy/temp; then
+            echo "Proxy fetch failed with error: $status, body: <binary>"
+        else
+            echo "Proxy fetch failed with error: $status, body: $(cat /ls-proxy/temp)"
+        fi
+    fi
+    sleep 45
+done
+"#
             );
-            let raw_script = script
-                .replace('\\', "\\\\")
-                .replace('\n', "\\n")
-                .replace('\'', r#"'"'"'"#);
+            // let raw_script = script
+            //     .replace('\\', "\\\\")
+            //     .replace('\n', "\\n")
+            //     .replace('\'', r#"'"'"'"#);
             writeln!(
                 &mut init_command,
                 r#" && \
-            echo -n '{raw_script}' > /certs/ls-cert/update_proxy.sh && \
-            chmod +x /certs/ls-cert/update_proxy.sh
-            "#
+(cat << 'EOFEOFEOF' > /certs/ls-cert/update_proxy.sh
+{script}
+EOFEOFEOF
+) && \
+chmod +x /certs/ls-cert/update_proxy.sh
+"#
             )
             .unwrap();
 
