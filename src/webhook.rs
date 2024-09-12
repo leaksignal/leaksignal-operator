@@ -624,14 +624,14 @@ while true; do
     filename=$(basename $(ls -t /ls-proxy/*.{{so,wasm}} 2>/dev/null | head -n1))
     base=${{filename%.*}}
     echo "checking for proxy updates from $base"
-    headers=$(curl --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
+    headers=$(curl -s --cacert /ls-cert/operator.crt --max-time 3600 --keepalive-time 30 --connect-timeout 60 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "hash: $base" -o /ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | tr -d '\r')
     status=$(echo -n "$headers" | grep -i "HTTP/" | awk '{{print $2}}' | tr -d '\n')
     if [ "$status" = "200" ]; then
         new_filename=$(echo -n "$headers" | grep -i "filename" | awk '{{print $2}}' | tr -d '\n')
         echo "Proxy fetch successful for $new_filename"
         mv -vf /ls-proxy/temp /ls-proxy/$new_filename
         new_base=${{new_filename%.*}}
-        curl --cacert /ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $new_base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm
+        curl -s --cacert /ls-cert/operator.crt --max-time 900 --connect-timeout 900 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -H "uid: $POD_UID" -H "hash: $new_base" https://leaksignal-operator.{ns}.svc:8443/proxy-confirm
     elif [ "$status" = "304" ]; then
         :
     else
