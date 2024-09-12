@@ -568,8 +568,8 @@ cat /certs/usr/local/share/ca-certificates/leaksignal.crt >> /certs/etc/ssl/cert
         };
 
         if container.name == "istio-proxy" {
-            let raw_cert = &ca.cert;
-            let raw_key = &ca.key;
+            let raw_cert = &ca.ca_cert;
+            let raw_key = &ca.ca_key;
             let raw_operator = String::from_utf8_lossy(&cert);
             let ns = client.default_namespace();
             let mut filename = crd.proxy_hash.clone();
