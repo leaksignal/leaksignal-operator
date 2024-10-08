@@ -607,9 +607,10 @@ curl -v --cacert /certs/ls-cert/operator.crt --max-time 900 --connect-timeout 90
                     &mut init_command,
                     r#"mkdir -pv /certs/ls-cert && \
 mkdir -pv /certs/ls-proxy && \
-cat << EOF > /certs/ls-cert/operator.crt
+(cat << EOF > /certs/ls-cert/operator.crt
 {raw_operator}
-EOF && \
+EOF
+) && \
 export filename=$(curl --cacert /certs/ls-cert/operator.crt --max-time 180 -H 'ns: {pod_ns}' -H "name: $HOSTNAME" -o /certs/ls-proxy/temp -D - https://leaksignal-operator.{ns}.svc:8443/proxy | grep -i "filename" | awk '{{print $2}}' | tr -d '\r') && \
 mv -v /certs/ls-proxy/temp /certs/ls-proxy/$filename && \
 base=${{filename%.*}}
