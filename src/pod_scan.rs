@@ -8,7 +8,10 @@ use kube::{
 };
 use log::{error, info};
 
-use crate::{CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio};
+use crate::{
+    istio::{CRDValues, ClusterLeaksignalIstio, LeaksignalIstio},
+    Error,
+};
 
 pub async fn run_pod_scan(client: Client) {
     let mut duration_secs = 30;

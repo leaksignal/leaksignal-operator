@@ -2,7 +2,10 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::{CRDValues, Error, GrpcMode};
+use crate::{
+    istio::{CRDValues, GrpcMode},
+    Error,
+};
 
 const PATH_PREFIX: &str = "/ls-proxy/";
 

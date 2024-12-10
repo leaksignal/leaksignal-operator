@@ -29,8 +29,9 @@ use warp::{
 
 use crate::{
     intercept::GeneratedCA,
+    istio::{CRDValues, ClusterLeaksignalIstio, LeaksignalIstio},
     proxy_mgr::{get_subject_hash, FILE_LOCATION},
-    CRDValues, ClusterLeaksignalIstio, Error, LeaksignalIstio,
+    Error,
 };
 
 const WEBHOOK_SECRET_NAME: &str = "leaksignal-operator-webhook-cert";

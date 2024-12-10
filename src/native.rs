@@ -1,4 +1,4 @@
-use crate::{CRDValues, Error};
+use crate::{istio::CRDValues, Error};
 use chrono::Utc;
 use k8s_openapi::api::{
     apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet},
