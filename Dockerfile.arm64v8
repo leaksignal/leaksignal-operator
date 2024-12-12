@@ -1,0 +1,24 @@
+FROM --platform=$BUILDPLATFORM rust:1.83.0-bullseye AS builder
+
+WORKDIR /build
+
+RUN rustup target add aarch64-unknown-linux-gnu
+
+RUN apt-get update && apt-get install cmake clang gcc-aarch64-linux-gnu -y
+
+COPY ./src ./src
+COPY ./Cargo.lock .
+COPY ./Cargo.toml .
+
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc
+
+RUN cargo build --target aarch64-unknown-linux-gnu --release -p leaksignal-operator && mv /build/target/aarch64-unknown-linux-gnu/release/leaksignal-operator /build/target/leaksignal-operator
+
+FROM arm64v8/debian:bullseye-slim AS run
+WORKDIR /runtime
+
+COPY --from=builder /build/target/leaksignal-operator /runtime/leaksignal-operator
+
+RUN apt-get update && apt-get install libssl1.1 ca-certificates -y && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["/runtime/leaksignal-operator"]

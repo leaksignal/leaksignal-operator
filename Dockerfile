@@ -1,29 +1,14 @@
-FROM lukemathwalker/cargo-chef:0.1.62-rust-1.74-slim-buster AS planner
-WORKDIR /plan
-
-COPY ./src ./src
-COPY ./Cargo.lock .
-COPY ./Cargo.toml .
-
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM lukemathwalker/cargo-chef:0.1.62-rust-1.74-slim-buster AS builder
-ARG BUILD_MODE=release
+FROM rust:1.83.0-bullseye AS builder
 
 WORKDIR /build
-RUN apt-get update && apt-get install cmake -y
-
-COPY --from=planner /plan/recipe.json recipe.json
-
-RUN cargo chef cook --release --recipe-path recipe.json -p leaksignal-operator
 
 COPY ./src ./src
 COPY ./Cargo.lock .
 COPY ./Cargo.toml .
 
-RUN cargo build --release -p leaksignal-operator && mv /build/target/release/leaksignal-operator /build/target/leaksignal-operator
+RUN cargo build --target x86_64-unknown-linux-gnu --release -p leaksignal-operator && mv /build/target/x86_64-unknown-linux-gnu/release/leaksignal-operator /build/target/leaksignal-operator
 
-FROM debian:buster-slim
+FROM debian:bullseye-slim AS run
 WORKDIR /runtime
 
 COPY --from=builder /build/target/leaksignal-operator /runtime/leaksignal-operator

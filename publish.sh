@@ -10,9 +10,19 @@ fi
 
 export TAG=$1
 
-docker build -t leaksignal/leaksignal-operator:$TAG -f ./Dockerfile .
-docker push leaksignal/leaksignal-operator:$TAG
-docker image rm leaksignal/leaksignal-operator:$TAG
+docker build -t leaksignal/leaksignal-operator:$TAG-amd64 -f ./Dockerfile .
+docker push leaksignal/leaksignal-operator:$TAG-amd64
+docker image rm leaksignal/leaksignal-operator:$TAG-amd64
+
+docker build --platform linux/arm64 -t leaksignal/leaksignal-operator:$TAG-arm64v8 -f ./Dockerfile.arm64v8 .
+docker push leaksignal/leaksignal-operator:$TAG-arm64v8
+docker image rm leaksignal/leaksignal-operator:$TAG-arm64v8
+
+docker manifest create \
+    leaksignal/leaksignal-operator:$TAG \
+    --amend leaksignal/leaksignal-operator:$TAG-amd64 \
+    --amend leaksignal/leaksignal-operator:$TAG-arm64v8
+docker manifest push leaksignal/leaksignal-operator:$TAG
 
 echo "Uploaded image leaksignal/leaksignal-operator:$TAG"
 
