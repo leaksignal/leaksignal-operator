@@ -3,6 +3,7 @@
 mod envoy_json;
 mod intercept;
 mod istio;
+mod leaktap;
 mod native;
 mod pod_scan;
 mod proxy_mgr;
@@ -16,6 +17,7 @@ use kube::{
     runtime::{watcher::Config, Controller},
     Api,
 };
+use leaktap::LeaksignalNetworkTapSpec;
 use log::{error, info, warn};
 use std::{fmt::Debug, sync::Arc};
 
@@ -74,6 +76,7 @@ async fn main() -> Result<(), kube::Error> {
     let leaksignal_istio_controller = Controller::new(Api::all(client.clone()), Config::default());
     let cluster_leaksignal_istio_controller =
         Controller::new(Api::all(client.clone()), Config::default());
+    let leaktap_controller = Controller::new(Api::all(client.clone()), Config::default());
 
     // Run both controllers
     let leaksignal_istio_drainer = leaksignal_istio_controller
@@ -115,7 +118,31 @@ async fn main() -> Result<(), kube::Error> {
             }
         });
 
+    let leaktap_drainer = leaktap_controller
+        .run(
+            LeaksignalNetworkTapSpec::reconcile,
+            LeaksignalNetworkTapSpec::on_error,
+            Arc::new(client.clone()),
+        )
+        .for_each(|reconciliation_result| async move {
+            match reconciliation_result {
+                Ok(leak_resource) => {
+                    info!(
+                        "Cluster reconciliation successful. Resource: {:?}",
+                        leak_resource
+                    );
+                }
+                Err(reconciliation_err) => {
+                    error!("Cluster reconciliation error: {:?}", reconciliation_err)
+                }
+            }
+        });
+
     // Combine both drainers
-    futures::future::join(leaksignal_istio_drainer, cluster_leaksignal_istio_drainer).await;
+    futures::join!(
+        leaksignal_istio_drainer,
+        cluster_leaksignal_istio_drainer,
+        leaktap_drainer
+    );
     Ok(())
 }

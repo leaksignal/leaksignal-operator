@@ -34,6 +34,9 @@ properties:
       - kind: ClusterLeaksignalIstio
         name: cluster-leaksignal-istios.leaksignal.com
         version: v1
+      - kind: LeaksignalNetworkTap
+        name: leaksignal-network-taps.leaksignal.com
+        version: v1
     description: This is an operator for LeakSignal.
     displayName: LeakSignal Operator
     installModes:

@@ -42,11 +42,14 @@ rules:
   - get
   - patch
   - update
+  - create
+  - replace
 - apiGroups:
   - leaksignal.com
   resources:
   - cluster-leaksignal-istios
   - leaksignal-istios
+  - leaksignal-network-taps
   verbs:
   - get
   - watch

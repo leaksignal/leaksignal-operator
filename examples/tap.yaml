@@ -1,0 +1,6 @@
+apiVersion: leaksignal.com/v1
+kind: LeaksignalNetworkTap
+metadata:
+  name: leaktap
+spec:
+  apiKey: api_key
