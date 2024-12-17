@@ -84,6 +84,11 @@ spec:
       kind: ClusterLeaksignalIstio
       description: Deploy LeakSignal Proxy in all istio-enabled namespaces, can be overriden by local LeaksignalIstios.
       displayName: ClusterLeaksignalIstio
+    - name: leaksignal-network-taps.leaksignal.com
+      version: v1
+      kind: LeaksignalNetworkTap
+      description: Deploy LeakSignal LeakTap in all namespaces.
+      displayName: LeaksignalNetworkTap
   install:
     strategy: deployment
     spec:
@@ -196,7 +201,7 @@ spec:
               priorityClassName: leaksignal-operator
               containers:
               - name: leaksignal-operator
-                image: docker.io/leaksignal/leaksignal-operator@sha256:762277b090810d1412e81ae4e9539896c98be28c88fc5f284361243eb8b84208
+                image: docker.io/leaksignal/leaksignal-operator@sha256:8f7982a4c7a513a888ebd0e9ac1830e94c83ef17c2edbe98f8434fe9be059878
                 volumeMounts:
                 - name: proxy-store
                   mountPath: /proxy
