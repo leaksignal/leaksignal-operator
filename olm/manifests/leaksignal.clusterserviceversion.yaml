@@ -37,6 +37,16 @@ metadata:
             "proxyVersion": "2024_01_29_22_53_36_5a454f0_0.9.5",
             "apiKey": "example"
           }
+        },
+        {
+          "apiVersion": "leaksignal.com/v1",
+          "kind": "LeaksignalNetworkTap",
+          "metadata": {
+            "name": "leaksignal-network-tap"
+          },
+          "spec": {
+            "apiKey": "example"
+          }
         }
       ]
 spec:
