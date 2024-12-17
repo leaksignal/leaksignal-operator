@@ -111,6 +111,8 @@ spec:
           - list
           - get
           - delete
+          - patch
+          - update
         - apiGroups: [""]
           resources:
           - namespaces
@@ -129,11 +131,15 @@ spec:
           - get
           - patch
           - update
+          - create
+          - replace
+          - delete
         - apiGroups:
           - leaksignal.com
           resources:
           - cluster-leaksignal-istios
           - leaksignal-istios
+          - leaksignal-network-taps
           verbs:
           - get
           - watch

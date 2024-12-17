@@ -14,11 +14,3 @@ spec:
       port: 8443
       targetPort: 8443
       name: webhook-tls
-    - protocol: TCP
-      port: 2049
-      targetPort: 2049
-      name: proxy-nfs
-    - protocol: TCP
-      port: 111
-      targetPort: 2049
-      name: proxy-rpcbind
