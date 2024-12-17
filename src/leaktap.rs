@@ -15,12 +15,14 @@ use k8s_openapi::{
     apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference},
 };
 use kube::{
-    api::{ObjectMeta, PostParams},
+    api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams},
     runtime::controller::Action,
     Api, Client, CustomResource, ResourceExt,
 };
+use log::{error, info};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::Error;
 
@@ -73,11 +75,48 @@ impl LeaksignalNetworkTapSpec {
         context: Arc<Client>,
     ) -> Result<Action, Error> {
         let client = context.as_ref().clone();
-
+        log::warn!("reconcile begin");
         let name = tap.name_any();
 
         let labels: BTreeMap<String, String> =
             [("app".to_string(), name.clone())].into_iter().collect();
+
+        let api: Api<DaemonSet> = Api::default_namespaced(client.clone());
+        let tap_api: Api<LeaksignalNetworkTap> = Api::all(client.clone());
+
+        if tap.metadata.deletion_timestamp.is_some() {
+            info!("{} deleted, cleaning up daemonset...", name);
+            if let Err(e) = api.delete(&name, &DeleteParams::default()).await {
+                error!("failed to delete DaemonSet {}: {}", name, e)
+            }
+
+            let patch = json!({
+                "metadata": {
+                    "finalizers": Vec::<String>::new(),
+                }
+            });
+            let patch = Patch::Merge(&patch);
+            tap_api
+                .patch(&name, &PatchParams::default(), &patch)
+                .await?;
+            return Ok(Action::await_change());
+        } else if tap
+            .metadata
+            .finalizers
+            .as_ref()
+            .map(|x| x.is_empty())
+            .unwrap_or(true)
+        {
+            let finalizer = json!({
+                "metadata": {
+                    "finalizers": ["finalizer.leaksignal.com"]
+                }
+            });
+            let patch: Patch<&Value> = Patch::Merge(&finalizer);
+            tap_api
+                .patch(&name, &PatchParams::default(), &patch)
+                .await?;
+        }
 
         let mut daemonset = DaemonSet {
             metadata: ObjectMeta {
@@ -173,7 +212,6 @@ impl LeaksignalNetworkTapSpec {
             status: None,
         };
 
-        let api: Api<DaemonSet> = Api::default_namespaced(client.clone());
         match api.get_opt(&name).await? {
             Some(current) => {
                 daemonset.metadata.resource_version = current.metadata.resource_version;
@@ -184,7 +222,6 @@ impl LeaksignalNetworkTapSpec {
                 api.create(&PostParams::default(), &daemonset).await?;
             }
         }
-
         Ok(Action::await_change())
     }
 
